@@ -295,7 +295,7 @@ def run_eval_pass(
     n_batches        = 0
 
     for batch in loader:
-        meg_windows    = batch["meg_windows"].to(device)   # (B, N, C, T)
+        meg_windows    = batch["meg_windows"].to(device)   # (B, N, C, T): N is number of words in test poem
         valid_mask     = batch["valid_mask"].to(device)
         word_token_ids = batch["word_token_ids"]
 
