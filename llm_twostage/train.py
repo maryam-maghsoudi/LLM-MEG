@@ -25,6 +25,7 @@ Results saved to:
 
 import argparse
 import json
+import random
 import sys
 import time
 from pathlib import Path
@@ -36,6 +37,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+
+# import pdb
 
 # ── local imports ─────────────────────────────────────────────────────────────
 _HERE = Path(__file__).parent
@@ -130,6 +133,52 @@ def kl_loss(q_logits_r, p_logits_r, valid_mask):
     return (kl_per * mask).sum() / denom
 
 
+def shuffle_time_per_trial(z: torch.Tensor, p_t_r: torch.Tensor) -> torch.Tensor:
+    """
+    Permute MEG positions independently within each trial while keeping the
+    target sequence p_1..p_T in its true order.
+
+    At step t the GRU sees some other word's MEG from the same trial instead
+    of word t's MEG. If the model just runs a step-counter that reproduces poem
+    statistics regardless of content, performance is unchanged. If it actually
+    uses the content of z_t for its position, performance degrades.
+
+    z     : (B, N, D)
+    p_t_r : (B, N, R) — infers each trial's real (non-padded) length via
+            non-zero rows (padded positions are all-zero from collate_sequences)
+    """
+    B, N, D = z.shape
+    z_out = z.clone()
+    valid_lengths = (p_t_r.abs().sum(-1) > 0).sum(dim=1)  # (B,) real word counts
+    for b in range(B):
+        L = int(valid_lengths[b].item())
+        if L > 1:
+            perm = torch.randperm(L, device=z.device)
+            z_out[b, :L] = z[b, perm]
+    return z_out
+
+
+def _within_poem_perm(B: int, metas: list, device) -> torch.Tensor:
+    """
+    Random permutation restricted to within-poem pairs.
+    Trials sharing the same poem are shuffled among themselves; others stay fixed.
+    Using within-poem shuffle (rather than across-poem) avoids confounding
+    sequence-length and vocabulary-distribution differences between poems.
+    Draw a fresh permutation every call — never reuse a fixed pairing.
+    """
+    perm = list(range(B))
+    poem_groups: dict = {}
+    for i, m in enumerate(metas):
+        poem_groups.setdefault(m["poem"], []).append(i)
+    for indices in poem_groups.values():
+        if len(indices) > 1:
+            shuffled = indices[:]
+            random.shuffle(shuffled)
+            for orig, new in zip(indices, shuffled):
+                perm[orig] = new
+    return torch.tensor(perm, device=device)
+
+
 # ===========================================================================
 #  Stage 1 training loop
 # ===========================================================================
@@ -170,10 +219,10 @@ def train_stage1(
         text_proj.train()
         t_losses = []
         for x, h in train_loader:
-            x = x.to(device)
-            h = h.to(device)
-            z = meg_enc(x)
-            t = text_proj(h)
+            x = x.to(device)    #torch.Size([64, 155, 100])
+            h = h.to(device)    #torch.Size([64, 960]): 960 is the d-model of HuggingFace/SmolLM2-360M
+            z = meg_enc(x)      #torch.Size([64, 128])
+            t = text_proj(h)    #torch.Size([64, 128])
             loss = loss_func(z, t)
             opt.zero_grad()
             loss.backward()
@@ -242,14 +291,19 @@ def train_stage2(
     train_loader: DataLoader,
     val_loader:   DataLoader,
     device,
-    lr:      float = S2_LR,
-    n_epochs: int  = S2_EPOCHS,
-    patience: int  = S2_PATIENCE,
-    out_dir:  Path = None,
+    lr:        float = S2_LR,
+    n_epochs:  int   = S2_EPOCHS,
+    patience:  int   = S2_PATIENCE,
+    out_dir:   Path  = None,
+    z_control: str   = "none",
 ) -> dict:
     """
     MEGEncoder is frozen throughout (set by caller before this function).
     Trains GRUHead only.  Saves best checkpoint to out_dir/stage2_best.pt.
+
+    z_control: 'none' = real MEG (default)
+               'zero' = replace z_t with zeros
+               'shuffle' = within-poem random trial permutation each batch
     """
     opt   = torch.optim.AdamW(gru_head.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_epochs)
@@ -277,6 +331,12 @@ def train_stage2(
             with torch.no_grad():
                 z = meg_enc(meg_seq.view(B * N, C, T))
             z = z.view(B, N, -1)                             # (B, N, emb)
+            if z_control == "zero":
+                z = torch.zeros_like(z)
+            elif z_control == "shuffle":
+                z = z[_within_poem_perm(B, batch["meta"], device)]
+            elif z_control == "shuffle_time":
+                z = shuffle_time_per_trial(z, p_t_r)
 
             y        = gru_head(z)                           # (B, N, d_model)
             all_logits = lm_head(y)                          # (B, N, V)
@@ -300,6 +360,12 @@ def train_stage2(
 
                 B, N, C, T = meg_seq.shape
                 z  = meg_enc(meg_seq.view(B * N, C, T)).view(B, N, -1)
+                if z_control == "zero":
+                    z = torch.zeros_like(z)
+                elif z_control == "shuffle":
+                    z = z[_within_poem_perm(B, batch["meta"], device)]
+                elif z_control == "shuffle_time":
+                    z = shuffle_time_per_trial(z, p_t_r)
                 y  = gru_head(z)
                 q  = lm_head(y)[:, :, r_ids]
                 v_losses.append(kl_loss(q, p_t_r, valid_mask).item())
@@ -396,6 +462,13 @@ def parse_args():
                    help="Root directory for outputs (default: llm_twostage/out)")
     p.add_argument("--device",     default=None,
                    help="cuda / cpu (default: cuda if available)")
+    p.add_argument("--z_control",  default="none",
+                   choices=["none", "zero", "shuffle", "shuffle_time"],
+                   help="Stage 2 z_t corruption for ablation retraining: "
+                        "'zero' replaces z_t with zeros; "
+                        "'shuffle' does within-poem trial permutation each batch")
+    p.add_argument("--load_stage1", default=None,
+                   help="Path to existing stage1_best.pt; skips Stage 1 training entirely")
     return p.parse_args()
 
 
@@ -429,8 +502,9 @@ def main():
     s1_pat     = args.patience if args.patience is not None else S1_PATIENCE
     s2_pat     = args.patience if args.patience is not None else S2_PATIENCE
 
-    tag = model_tag(args.llm_name)
-    out_dir = Path(args.out_root) / tag / args.heldout
+    tag         = model_tag(args.llm_name)
+    ctrl_suffix = f"_ctrl_{args.z_control}" if args.z_control != "none" else ""
+    out_dir     = Path(args.out_root) / tag / f"{args.heldout}{ctrl_suffix}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*60}")
@@ -461,98 +535,102 @@ def main():
     R          = r_ids.shape[0]
     print(f"\nRestricted vocab size R={R}")
 
-    # ── Stage 1 datasets ─────────────────────────────────────────────────
-    print("\nBuilding Stage 1 datasets ...")
-    t0 = time.time()
-    ds_s1_train = MEGWordDatasetLLM(
-        **splits["train"], llm_name=args.llm_name,
-        hmid_layer=hmid_layer, augment=True,
-    )
-    ds_s1_val = MEGWordDatasetLLM(
-        **splits["val"],   llm_name=args.llm_name,
-        hmid_layer=hmid_layer, augment=False,
-    )
-    print(f"  (built in {time.time()-t0:.1f}s)")
+    # ── Stage 1 ──────────────────────────────────────────────────────────
+    meg_enc = MEGEncoder().to(device)
 
-    if len(ds_s1_train) == 0:
-        raise RuntimeError("Stage 1 training set is empty — check MEG files and cache.")
-
-    dl_s1_train = DataLoader(ds_s1_train, batch_size=args.s1_bs, shuffle=True,
-                             num_workers=2, pin_memory=(device.type == "cuda"))
-    dl_s1_val   = DataLoader(ds_s1_val,   batch_size=args.s1_bs, shuffle=False,
-                             num_workers=2, pin_memory=(device.type == "cuda"))
-
-    # ── Stage 2 datasets ─────────────────────────────────────────────────
-    if not args.skip_stage2:
-        print("\nBuilding Stage 2 datasets ...")
-        t0 = time.time()
-        ds_s2_train = MEGSequenceDataset(
-            **splits["train"], llm_name=args.llm_name,
+    if args.load_stage1:
+        # Skip training; load an existing Stage 1 checkpoint directly.
+        print(f"\nSkipping Stage 1 training — loading {args.load_stage1}")
+        ckpt = torch.load(args.load_stage1, map_location="cpu")
+        meg_enc.load_state_dict(ckpt["meg_encoder"])
+        meg_enc.freeze()
+        s1_history = {"train_loss": [], "val_loss": []}
+        (out_dir / "stage1_val_metrics.json").write_text(
+            json.dumps({"loaded_from": str(args.load_stage1), "skipped": True}, indent=2)
         )
-        ds_s2_val = MEGSequenceDataset(
+        print(f"MEGEncoder frozen  (from {args.load_stage1})")
+    else:
+        # Normal path: build datasets, train, freeze.
+        print("\nBuilding Stage 1 datasets ...")
+        t0 = time.time()
+        ds_s1_train = MEGWordDatasetLLM(
+            **splits["train"], llm_name=args.llm_name,
+            hmid_layer=hmid_layer, augment=True,
+        )
+        ds_s1_val = MEGWordDatasetLLM(
             **splits["val"],   llm_name=args.llm_name,
+            hmid_layer=hmid_layer, augment=False,
         )
         print(f"  (built in {time.time()-t0:.1f}s)")
 
-        dl_s2_train = DataLoader(ds_s2_train, batch_size=args.s2_bs, shuffle=True,
-                                 collate_fn=collate_sequences, num_workers=2,
-                                 pin_memory=(device.type == "cuda"))
-        dl_s2_val   = DataLoader(ds_s2_val,   batch_size=args.s2_bs, shuffle=False,
-                                 collate_fn=collate_sequences, num_workers=2,
-                                 pin_memory=(device.type == "cuda"))
+        if len(ds_s1_train) == 0:
+            raise RuntimeError("Stage 1 training set is empty — check MEG files and cache.")
 
-    # ── models ───────────────────────────────────────────────────────────
-    print("\nInitializing models ...")
-    meg_enc   = MEGEncoder().to(device)
-    text_proj = LLMTextProjection(d_model=d_model).to(device)
+        dl_s1_train = DataLoader(ds_s1_train, batch_size=args.s1_bs, shuffle=True,
+                                 num_workers=2, pin_memory=(device.type == "cuda"))
+        dl_s1_val   = DataLoader(ds_s1_val,   batch_size=args.s1_bs, shuffle=False,
+                                 num_workers=2, pin_memory=(device.type == "cuda"))
 
-    n_enc  = sum(p.numel() for p in meg_enc.parameters())
-    n_proj = sum(p.numel() for p in text_proj.parameters())
-    print(f"  MEGEncoder      {n_enc:,} params")
-    print(f"  TextProjection  {n_proj:,} params  (d_model={d_model} → 128)")
+        text_proj = LLMTextProjection(d_model=d_model).to(device)
+        n_enc  = sum(p.numel() for p in meg_enc.parameters())
+        n_proj = sum(p.numel() for p in text_proj.parameters())
+        print("\nInitializing models ...")
+        print(f"  MEGEncoder      {n_enc:,} params")
+        print(f"  TextProjection  {n_proj:,} params  (d_model={d_model} → 128)")
 
-    # ── Stage 1 ──────────────────────────────────────────────────────────
-    s1_result = train_stage1(
-        meg_enc    = meg_enc,
-        text_proj  = text_proj,
-        train_loader = dl_s1_train,
-        val_loader   = dl_s1_val,
-        device     = device,
-        loss_fn    = args.loss,
-        lr         = args.s1_lr,
-        n_epochs   = args.s1_epochs,
-        patience   = s1_pat,
-        out_dir    = out_dir,
-    )
+        s1_result = train_stage1(
+            meg_enc      = meg_enc,
+            text_proj    = text_proj,
+            train_loader = dl_s1_train,
+            val_loader   = dl_s1_val,
+            device       = device,
+            loss_fn      = args.loss,
+            lr           = args.s1_lr,
+            n_epochs     = args.s1_epochs,
+            patience     = s1_pat,
+            out_dir      = out_dir,
+        )
 
-    # Save Stage 1 val metrics
-    s1_metrics = {
-        "best_val_loss": s1_result["best_val"],
-        "best_epoch":    s1_result["best_epoch"],
-        "n_epochs_run":  len(s1_result["history"]["train_loss"]),
-    }
-    (out_dir / "stage1_val_metrics.json").write_text(
-        json.dumps(s1_metrics, indent=2)
-    )
-    print(f"\nStage 1 summary: best_val={s1_result['best_val']:.4f}  "
-          f"at epoch {s1_result['best_epoch']}")
+        s1_metrics = {
+            "best_val_loss": s1_result["best_val"],
+            "best_epoch":    s1_result["best_epoch"],
+            "n_epochs_run":  len(s1_result["history"]["train_loss"]),
+        }
+        (out_dir / "stage1_val_metrics.json").write_text(
+            json.dumps(s1_metrics, indent=2)
+        )
+        print(f"\nStage 1 summary: best_val={s1_result['best_val']:.4f}  "
+              f"at epoch {s1_result['best_epoch']}")
 
-    if args.skip_stage2:
-        plot_curves(s1_result["history"],
-                    {"train_loss": [], "val_loss": []},
-                    out_dir / "training_curve.png")
-        print("\nDone (Stage 1 only).")
-        return
+        if args.skip_stage2:
+            plot_curves(s1_result["history"],
+                        {"train_loss": [], "val_loss": []},
+                        out_dir / "training_curve.png")
+            print("\nDone (Stage 1 only).")
+            return
 
-    # ── Restore best Stage 1 weights before freezing ─────────────────────
-    best_s1 = s1_result["best_state"]
-    meg_enc.load_state_dict(best_s1["meg_encoder"])
-    meg_enc.freeze()                               # freeze + permanent eval mode
-    print(f"\nMEGEncoder frozen at Stage 1 best (epoch {best_s1['epoch']}).")
+        best_s1 = s1_result["best_state"]
+        meg_enc.load_state_dict(best_s1["meg_encoder"])
+        meg_enc.freeze()
+        print(f"\nMEGEncoder frozen at Stage 1 best (epoch {best_s1['epoch']}).")
+        s1_history = s1_result["history"]
 
-    # ── Load lm_head ─────────────────────────────────────────────────────
-    lm_head = load_lm_head(args.llm_name, device=device)
+    # ── Stage 2 datasets ─────────────────────────────────────────────────
+    print("\nBuilding Stage 2 datasets ...")
+    t0 = time.time()
+    ds_s2_train = MEGSequenceDataset(**splits["train"], llm_name=args.llm_name)
+    ds_s2_val   = MEGSequenceDataset(**splits["val"],   llm_name=args.llm_name)
+    print(f"  (built in {time.time()-t0:.1f}s)")
 
+    dl_s2_train = DataLoader(ds_s2_train, batch_size=args.s2_bs, shuffle=True,
+                             collate_fn=collate_sequences, num_workers=2,
+                             pin_memory=(device.type == "cuda"))
+    dl_s2_val   = DataLoader(ds_s2_val,   batch_size=args.s2_bs, shuffle=False,
+                             collate_fn=collate_sequences, num_workers=2,
+                             pin_memory=(device.type == "cuda"))
+
+    # ── Load lm_head + GRUHead ────────────────────────────────────────────
+    lm_head  = load_lm_head(args.llm_name, device=device)
     gru_head = GRUHead(
         meg_emb    = MEG_EMB,
         gru_hidden = args.gru_hidden,
@@ -560,6 +638,8 @@ def main():
     ).to(device)
     n_gru = sum(p.numel() for p in gru_head.parameters())
     print(f"GRUHead  {n_gru:,} params  (hidden={args.gru_hidden})")
+    if args.z_control != "none":
+        print(f"[control] z_control={args.z_control!r} — z_t will be corrupted during Stage 2")
 
     # ── Stage 2 ──────────────────────────────────────────────────────────
     s2_result = train_stage2(
@@ -574,6 +654,7 @@ def main():
         n_epochs     = args.s2_epochs,
         patience     = s2_pat,
         out_dir      = out_dir,
+        z_control    = args.z_control,
     )
 
     s2_metrics = {
@@ -588,7 +669,7 @@ def main():
           f"at epoch {s2_result['best_epoch']}")
 
     # ── Training curve ───────────────────────────────────────────────────
-    plot_curves(s1_result["history"], s2_result["history"],
+    plot_curves(s1_history, s2_result["history"],
                 out_dir / "training_curve.png")
 
     print(f"\nAll results in {out_dir}")

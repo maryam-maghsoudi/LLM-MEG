@@ -43,7 +43,7 @@ from dataset import (
     POEM_KEYS,
 )
 from models import MEGEncoder, LLMTextProjection, GRUHead, load_lm_head
-from train import MODEL_CONFIGS, kl_loss, MEG_EMB, GRU_HIDDEN
+from train import MODEL_CONFIGS, kl_loss, shuffle_time_per_trial, MEG_EMB, GRU_HIDDEN
 
 
 # ===========================================================================
@@ -184,6 +184,76 @@ def evaluate_stage2(
 
 
 # ===========================================================================
+#  Stage 2 — eval-only control ablations (no retrain)
+# ===========================================================================
+
+@torch.no_grad()
+def evaluate_stage2_control(
+    meg_enc:  MEGEncoder,
+    gru_head: GRUHead,
+    lm_head:  torch.nn.Module,
+    r_ids:    torch.Tensor,
+    test_loader: DataLoader,
+    device,
+    mode: str = "zero",
+) -> dict:
+    """
+    Eval-only ablation using the already-trained stage2_best.pt weights.
+    Tests whether the trained GRU actually relies on real z_t.
+
+    mode='zero'    — replace z_t with zeros
+    mode='shuffle' — randomly permute trials in each batch (simple across-batch
+                     shuffle; fine for eval since we just want a signal check)
+
+    If the trained model's KL / agreement barely changes under either mode,
+    the GRU was never leaning on MEG content in the first place.
+    """
+    meg_enc.eval()
+    gru_head.eval()
+
+    total_kl    = 0.0
+    total_agree = 0
+    total_valid = 0
+
+    for batch in test_loader:
+        meg_seq    = batch["meg_windows"].to(device)
+        p_t_r      = batch["p_t_restricted"].to(device)
+        valid_mask = batch["valid_mask"].to(device)
+        B, N, C, T = meg_seq.shape
+
+        z = meg_enc(meg_seq.view(B * N, C, T)).view(B, N, -1)
+
+        if mode == "zero":
+            z = torch.zeros_like(z)
+        elif mode == "shuffle":
+            perm = torch.randperm(B, device=device)
+            z    = z[perm]
+        elif mode == "shuffle_time":
+            z = shuffle_time_per_trial(z, p_t_r)
+
+        y  = gru_head(z)
+        q  = lm_head(y)[:, :, r_ids]
+
+        kl       = kl_loss(q, p_t_r, valid_mask)
+        mask_pos = valid_mask[:, 1:]
+        n_valid  = mask_pos.sum().item()
+        total_kl    += kl.item() * n_valid
+        total_valid += n_valid
+
+        q_top1 = q[:, :-1, :].argmax(-1)
+        p_top1 = p_t_r[:, :-1, :].argmax(-1)
+        total_agree += ((q_top1 == p_top1) & mask_pos).sum().item()
+
+    mean_kl   = total_kl   / max(total_valid, 1)
+    agreement = total_agree / max(total_valid, 1)
+    return {
+        "mean_kl":             float(mean_kl),
+        "next_word_agreement": float(agreement),
+        "n_valid_positions":   int(total_valid),
+    }
+
+
+# ===========================================================================
 #  Main
 # ===========================================================================
 
@@ -196,6 +266,9 @@ def parse_args():
     p.add_argument("--gru_hidden", type=int, default=GRU_HIDDEN)
     p.add_argument("--skip_stage2", action="store_true")
     p.add_argument("--out_root",   default=str(_HERE / "out"))
+    p.add_argument("--ckpt_dir",   default=None,
+                   help="Override checkpoint directory (default: out_root/model_tag/heldout). "
+                        "Useful for evaluating control runs whose directory names differ from heldout.")
     p.add_argument("--device",     default=None)
     return p.parse_args()
 
@@ -211,7 +284,7 @@ def main():
     hmid_layer = args.hmid_layer if args.hmid_layer is not None else cfg["hmid_layer"]
 
     tag     = model_tag(args.llm_name)
-    out_dir = Path(args.out_root) / tag / args.heldout
+    out_dir = Path(args.ckpt_dir) if args.ckpt_dir else Path(args.out_root) / tag / args.heldout
     ckpt_s1 = out_dir / "stage1_best.pt"
     ckpt_s2 = out_dir / "stage2_best.pt"
 
@@ -275,6 +348,25 @@ def main():
                                  dl_test_s2, device)
     (out_dir / "eval_stage2.json").write_text(json.dumps(s2_results, indent=2))
     print(f"Saved → {out_dir / 'eval_stage2.json'}")
+
+    # ── Eval-only controls (Experiment #1 — no retrain) ──────────────────
+    print("\n── Stage 2 Controls (eval-only swap, existing weights) ──────")
+    ctrl_results = {"real": s2_results}
+    for mode in ("zero", "shuffle", "shuffle_time"):
+        ctrl_results[mode] = evaluate_stage2_control(
+            meg_enc, gru_head, lm_head, r_ids, dl_test_s2, device, mode=mode
+        )
+
+    print(f"  {'mode':8s}  {'KL':>8}  {'agreement':>10}")
+    print(f"  {'-'*34}")
+    for mode, r in ctrl_results.items():
+        marker = "  ← trained model" if mode == "real" else ""
+        print(f"  {mode:8s}  {r['mean_kl']:8.4f}  {r['next_word_agreement']:10.4f}{marker}")
+
+    (out_dir / "eval_stage2_controls.json").write_text(
+        json.dumps(ctrl_results, indent=2)
+    )
+    print(f"Saved → {out_dir / 'eval_stage2_controls.json'}")
 
 
 if __name__ == "__main__":

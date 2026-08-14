@@ -23,7 +23,7 @@ import torch.nn.functional as F
 #  Defaults
 # ---------------------------------------------------------------------------
 N_CHANNELS = 155
-WIN_SIZE   = 100   # [-200ms, +800ms] @ 100 Hz
+WIN_SIZE   = 40    # [-100ms, +300ms] @ 100 Hz
 MEG_EMB    = 128
 
 

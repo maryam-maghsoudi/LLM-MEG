@@ -30,7 +30,6 @@ import numpy as np
 import torch
 from scipy.signal import resample
 from torch.utils.data import Dataset
-
 mne.set_log_level("ERROR")
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -49,9 +48,9 @@ DS_FACTOR    = 10
 SFREQ_DS     = 100.0
 N_CHANNELS   = 155
 EPOCH_TMIN_S = 0.0
-WIN_PRE      = int(200 * SFREQ_DS / 1000)    # 20 samples
-WIN_POST     = int(800 * SFREQ_DS / 1000)    # 80 samples
-WIN_SIZE     = WIN_PRE + WIN_POST             # 100 samples
+WIN_PRE      = int(100 * SFREQ_DS / 1000)    # 10 samples
+WIN_POST     = int(300 * SFREQ_DS / 1000)    # 30 samples
+WIN_SIZE     = WIN_PRE + WIN_POST             # 40 samples
 
 SUBJECTS = [
     "sub-01", "sub-03", "sub-04", "sub-05", "sub-06", "sub-09", "sub-10",
@@ -82,10 +81,10 @@ def _load_meg_trial(subject: str, condition: str, session: int) -> Optional[np.n
     except Exception:
         return None
     raw  = epochs.get_data().mean(axis=0)
-    data = resample(raw, raw.shape[1] // DS_FACTOR, axis=1).astype(np.float32)
+    data = resample(raw, raw.shape[1] // DS_FACTOR, axis=1) * 1e12
     mu   = data.mean(axis=1, keepdims=True)
     sd   = np.maximum(data.std(axis=1, keepdims=True), 1e-12)
-    return (data - mu) / sd
+    return ((data - mu) / sd).astype(np.float32)
 
 
 def _onset_to_window(onset_s: float, n_t: int) -> Optional[Tuple[int, int]]:
