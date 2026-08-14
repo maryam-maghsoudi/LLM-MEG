@@ -1,0 +1,13 @@
+# Claude Code instructions
+CLAUDE.md
+
+# Model checkpoints and training outputs
+out/
+
+# Slurm logs
+slurm_logs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
