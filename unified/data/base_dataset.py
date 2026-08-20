@@ -5,6 +5,26 @@ MEGWordDataset   One item per word occurrence (word-level, for Stage 1 / Method 
 MEGTrialDataset  One item per (subject, poem, session) trial (sequence-level,
                  for Stage 2 / Method 3).
 collate_trials   Pads variable-length trials into batched tensors.
+
+Sharing without .fif files
+--------------------------
+Build the full datasets once (all subjects / poems / sessions), save to disk,
+then reconstruct any split on the collaborator's machine without .fif access:
+
+    # One-time export (requires .fif files):
+    python -m unified.data.export_datasets --out_dir /path/to/cache
+
+    # Collaborator usage (no .fif files needed):
+    from unified.data.base_dataset import MEGWordDataset, MEGTrialDataset
+    from unified.data.splits import make_loso_splits
+
+    word_items  = MEGWordDataset.load_items("/path/to/cache/meg_word_all.pt")
+    trial_items = MEGTrialDataset.load_items("/path/to/cache/meg_trial_all.pt")
+
+    splits   = make_loso_splits("sub-01")
+    ds_train = MEGWordDataset.from_cache(word_items,  splits["train"])
+    ds_val   = MEGWordDataset.from_cache(word_items,  splits["val"])
+    ds_trial = MEGTrialDataset.from_cache(trial_items, splits["train"])
 """
 
 import json
@@ -220,6 +240,60 @@ class MEGWordDataset(Dataset):
             "session":    item["session"],
         }
 
+    # ------------------------------------------------------------------
+    #  Cache helpers (no .fif files required on load)
+    # ------------------------------------------------------------------
+
+    def save_items(self, path: str) -> None:
+        """Save all items to a .pt file for sharing without .fif access."""
+        torch.save(self._items, path)
+        print(f"  MEGWordDataset  saved {len(self._items):,} items → {path}")
+
+    @staticmethod
+    def load_items(path: str) -> List[Dict]:
+        """Load raw items saved by save_items()."""
+        return torch.load(path, weights_only=False)
+
+    @classmethod
+    def from_cache(
+        cls,
+        all_items:   List[Dict],
+        split:       Dict,
+        augment:     bool = False,
+    ) -> "MEGWordDataset":
+        """
+        Reconstruct a split-specific dataset from pre-cached items.
+
+        Parameters
+        ----------
+        all_items : full item list returned by load_items()
+        split     : one entry from make_*_splits() — a dict with keys
+                    'trials' and 'word_filter'
+        augment   : passed through to __getitem__
+
+        Returns a MEGWordDataset without reading any .fif files.
+        """
+        trials      = {(s, p, sess) for s, p, sess in split["trials"]}
+        word_filter = split.get("word_filter")
+
+        allowed: Dict[str, Optional[Set[int]]] = {}
+        for poem in ["poem1", "poem2"]:
+            if word_filter is None or poem not in word_filter:
+                allowed[poem] = None
+            else:
+                allowed[poem] = set(word_filter[poem])
+
+        obj = cls.__new__(cls)
+        obj.augment = augment
+        obj._items  = [
+            item for item in all_items
+            if (item["subject"], item["poem"], item["session"]) in trials
+            and (allowed[item["poem"]] is None
+                 or item["word_pos"] in allowed[item["poem"]])
+        ]
+        print(f"  MEGWordDataset.from_cache  items={len(obj._items):,}")
+        return obj
+
 
 # ---------------------------------------------------------------------------
 #  MEGTrialDataset — sequence-level, for Stage 2 (GRU) and Method 3 (interleaved)
@@ -312,6 +386,82 @@ class MEGTrialDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict:
         return self._items[idx]
+
+    # ------------------------------------------------------------------
+    #  Cache helpers (no .fif files required on load)
+    # ------------------------------------------------------------------
+
+    def save_items(self, path: str) -> None:
+        """Save all items to a .pt file for sharing without .fif access."""
+        torch.save(self._items, path)
+        print(f"  MEGTrialDataset  saved {len(self._items):,} items → {path}")
+
+    @staticmethod
+    def load_items(path: str) -> List[Dict]:
+        """Load raw items saved by save_items()."""
+        return torch.load(path, weights_only=False)
+
+    @classmethod
+    def from_cache(
+        cls,
+        all_items:   List[Dict],
+        split:       Dict,
+    ) -> "MEGTrialDataset":
+        """
+        Reconstruct a split-specific dataset from pre-cached items.
+
+        Parameters
+        ----------
+        all_items : full item list returned by load_items()
+        split     : one entry from make_*_splits() — a dict with keys
+                    'trials' and 'word_filter'
+
+        For the stimulus split, word_filter restricts which word positions
+        are included within each trial's sequence. Positions outside the
+        filter are zeroed out and marked invalid in valid_mask.
+
+        Returns a MEGTrialDataset without reading any .fif files.
+        """
+        trials      = {(s, p, sess) for s, p, sess in split["trials"]}
+        word_filter = split.get("word_filter")
+
+        allowed: Dict[str, Optional[Set[int]]] = {}
+        for poem in ["poem1", "poem2"]:
+            if word_filter is None or poem not in word_filter:
+                allowed[poem] = None
+            else:
+                allowed[poem] = set(word_filter[poem])
+
+        obj = cls.__new__(cls)
+        obj._items = []
+
+        for item in all_items:
+            key = (item["subject"], item["poem"], item["session"])
+            if key not in trials:
+                continue
+
+            allow_set = allowed[item["poem"]]
+            if allow_set is None:
+                obj._items.append(item)
+            else:
+                # Keep only word positions in the filter; zero-out the rest
+                poses      = item["word_poses"]
+                keep       = [i for i, p in enumerate(poses) if p in allow_set]
+                if not keep:
+                    continue
+                new_item = {
+                    "meg_windows": item["meg_windows"][keep],
+                    "valid_mask":  item["valid_mask"][keep],
+                    "word_texts":  [item["word_texts"][i] for i in keep],
+                    "word_poses":  [poses[i]              for i in keep],
+                    "poem":        item["poem"],
+                    "subject":     item["subject"],
+                    "session":     item["session"],
+                }
+                obj._items.append(new_item)
+
+        print(f"  MEGTrialDataset.from_cache  trials={len(obj._items):,}")
+        return obj
 
 
 def collate_trials(batch: List[Dict]) -> Dict:

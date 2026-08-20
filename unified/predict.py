@@ -226,9 +226,24 @@ def _predict_twostage(
                 r_ids.append(ids[0] if ids else tokenizer.unk_token_id)
         r_ids_t = torch.tensor(r_ids, dtype=torch.long, device=device)
 
+        # Apply the same control that was used during training so that
+        # shuffle_time / zero models are evaluated under matching conditions.
+        control = cfg.get("control", "none")
+        if control == "zero":
+            z = torch.zeros_like(z)
+        elif control == "shuffle_time":
+            perm = torch.randperm(z.size(1), device=z.device)
+            z = z[:, perm, :]
+
         y         = gru_head(z)                     # (1, N, d_model)
         all_logits= lm_head(y)[0]                   # (N, vocab_size)
-        scores    = all_logits[:, r_ids_t].cpu()    # (N, |V|)
+        raw       = all_logits[:, r_ids_t].cpu()    # (N, |V|)
+
+        # raw[i] = lm_head(y_i) predicts word i+1, not word i.
+        # Shift so that scores[i] is the prediction for word i (from context z_0..z_{i-1}).
+        # Position 0 has no GRU predecessor → leave as zeros (evaluated as random rank).
+        scores = torch.zeros_like(raw)
+        scores[1:] = raw[:-1]
 
     else:
         # Fallback: Stage 1 cosine similarity against LLM text hiddens

@@ -377,8 +377,6 @@ def train(
     r_ids      = torch.tensor(vocab_info["restricted_first_token_ids"],
                                dtype=torch.long, device=device)
 
-    from ..data.controls import make_control
-
     meg_enc = MEGEncoder().to(device)
 
     # ── Stage 1 ──────────────────────────────────────────────────────────────
@@ -393,11 +391,9 @@ def train(
         print("\nBuilding Stage 1 datasets ...")
         t0 = time.time()
         base_tr = MEGWordDataset(splits["train"]["trials"],
-                                  splits["train"]["word_filter"], augment=True)
+                                  splits["train"]["word_filter"], augment=False)
         base_vl = MEGWordDataset(splits["val"]["trials"],
                                   splits["val"]["word_filter"],   augment=False)
-        base_tr = make_control(base_tr, control, augment=True)
-        base_vl = make_control(base_vl, control, augment=False)
 
         ds_tr = LLMAugmentedDataset(base_tr, llm_caches, hmid_layer)
         ds_vl = LLMAugmentedDataset(base_vl, llm_caches, hmid_layer)
@@ -433,9 +429,6 @@ def train(
                                    splits["train"]["word_filter"])
     base_seq_vl = MEGTrialDataset(splits["val"]["trials"],
                                    splits["val"]["word_filter"])
-    # Controls for Stage 2 trial datasets
-    base_seq_tr = make_control(base_seq_tr, control)
-    base_seq_vl = make_control(base_seq_vl, control)
 
     ds_seq_tr = LLMSequenceDataset(base_seq_tr, llm_caches)
     ds_seq_vl = LLMSequenceDataset(base_seq_vl, llm_caches)

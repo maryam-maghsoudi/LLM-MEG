@@ -1,0 +1,29 @@
+# Claude Code instructions (not for repo)
+CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Trained model checkpoints and large outputs
+out/
+unified/out/
+llm_twostage/out/
+
+# Large cached datasets (.pt files)
+unified/data/cache/
+llm_twostage/cache/
+
+# Slurm logs
+slurm_logs/
+unified/slurm_logs/
+llm_twostage/slurm_logs/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
