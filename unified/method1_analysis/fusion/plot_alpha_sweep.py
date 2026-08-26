@@ -9,11 +9,11 @@ Each figure: two side-by-side subplots (logsoftmax | row_zscore), shared y-axis.
 Within each subplot: one thin line per LOSO subject + one thick mean line.
 
 Usage (from llm_decoder/):
-    python -m unified.inference_analysis.plot_alpha_sweep
-    python -m unified.inference_analysis.plot_alpha_sweep \\
+    python -m unified.method1_analysis.fusion.plot_alpha_sweep
+    python -m unified.method1_analysis.fusion.plot_alpha_sweep \\
         --method inference \\
         --out_root unified/out \\
-        --out_dir unified/inference_analysis/figures
+        --out_dir unified/method1_analysis/fusion/figures
 """
 
 import argparse
@@ -27,7 +27,7 @@ import matplotlib.cm as cm
 import numpy as np
 
 _HERE    = Path(__file__).parent
-_OUT_ROOT = _HERE.parent / "out"
+_OUT_ROOT = _HERE.parent.parent / "out"
 _OUT_DIR  = _HERE / "figures"
 
 METRICS = [
