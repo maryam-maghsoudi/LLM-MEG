@@ -22,6 +22,14 @@ slurm_logs/
 unified/slurm_logs/
 llm_twostage/slurm_logs/
 
+# Analysis figures and results (generated outputs)
+unified/method1_analysis/fusion/figures/
+unified/method1_analysis/results/
+unified/method2_analysis/figures/
+unified/method2_analysis/results/
+unified/method3_analysis/figures/
+unified/method3_analysis/results/
+
 # Editor / OS
 .DS_Store
 *.swp
