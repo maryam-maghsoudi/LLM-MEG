@@ -2,16 +2,18 @@
 plot_alpha_sweep.py — Alpha sweep curves for LLM+MEG fusion results.
 
 Loads per-fold fusion JSONs from:
-    unified/out/{method}/{model_tag}/{scheme}_{fold}/fusion/fusion_{llm_tag}_{norm}.json
+    unified/out/{method}/{model_tag}/{scheme}_{fold}/{fusion_subdir}/fusion_{llm_tag}_{norm}.json
 
-Produces 5 figures (one per metric) for each eval scheme (loso, session_cv):
+fusion_subdir is "fusion" (test set, default) or "fusion_on_val" (validation set).
+
+Produces 5 figures (one per metric) for each eval scheme (loso, session_cv, stimulus):
 R@1, MRR, Word Accuracy, BLEU-1, WER.
 Each figure: two side-by-side subplots (logsoftmax | row_zscore), shared y-axis.
 Within each subplot: one thin line per fold + one thick mean line.
 
 Figures are saved to:
-    {out_dir}/loso/alpha_sweep_{method}_{metric}.{pdf,png}
-    {out_dir}/session_cv/alpha_sweep_{method}_{metric}.{pdf,png}
+    {out_dir}/{eval_scheme}/alpha_sweep_{method}_{metric}.{pdf,png}          (test)
+    {out_dir}/{eval_scheme}_val/alpha_sweep_{method}_{metric}.{pdf,png}      (val)
 
 Usage (from llm_decoder/):
     python -m unified.method1_analysis.fusion.plot_alpha_sweep
@@ -19,6 +21,9 @@ Usage (from llm_decoder/):
         --method inference \\
         --out_root unified/out \\
         --out_dir unified/method1_analysis/fusion/figures
+    python -m unified.method1_analysis.fusion.plot_alpha_sweep \\
+        --fusion_subdir fusion_on_val \\
+        --schemes loso session_cv stimulus
 """
 
 import argparse
@@ -52,6 +57,7 @@ NORM_LABELS = {
 SCHEME_CONFIG = {
     "loso":       {"prefix": "loso_",            "strip": "loso_",            "label": "LOSO subjects"},
     "session_cv": {"prefix": "session_cv_fold",  "strip": "session_cv_fold",  "label": "session CV folds"},
+    "stimulus":   {"prefix": "stimulus_lines",   "strip": "stimulus_lines",   "label": "stimulus lines"},
 }
 
 
@@ -63,7 +69,8 @@ def _model_tag(method: str, llm_tag: str, bert_tag: str) -> str:
 
 def load_fold_results(out_root: Path, method: str, model_tag: str,
                       eval_scheme: str, fusion_llm_tag: str, norm: str,
-                      control: str = "none") -> dict:
+                      control: str = "none",
+                      fusion_subdir: str = "fusion") -> dict:
     """
     Glob for all per-fold fusion JSONs for the given eval scheme.
 
@@ -78,7 +85,7 @@ def load_fold_results(out_root: Path, method: str, model_tag: str,
 
     fold_data = {}
     for fold_dir in sorted(base_dir.glob(pattern)):
-        fusion_file = fold_dir / "fusion" / f"fusion_{fusion_llm_tag}_{norm}.json"
+        fusion_file = fold_dir / fusion_subdir / f"fusion_{fusion_llm_tag}_{norm}.json"
         if not fusion_file.exists():
             continue
         data = json.loads(fusion_file.read_text())
@@ -103,7 +110,8 @@ def extract_curves(fold_data: dict, alphas: np.ndarray, metric_key: str):
 
 def plot_metric(metric_key: str, metric_label: str, lower_is_better: bool,
                 alphas: np.ndarray, results_by_norm: dict,
-                method: str, eval_scheme: str, out_dir: Path):
+                method: str, eval_scheme: str, out_dir: Path,
+                scheme_dir_suffix: str = ""):
     fold_keys = sorted(results_by_norm[NORMS[0]].keys())
     colors    = cm.tab20(np.linspace(0, 1, max(len(fold_keys), 1)))
     scheme_label = SCHEME_CONFIG[eval_scheme]["label"]
@@ -149,7 +157,7 @@ def plot_metric(metric_key: str, metric_label: str, lower_is_better: bool,
     fig.tight_layout()
 
     safe_label = metric_label.lower().replace(" ", "_").replace("-", "")
-    scheme_dir = out_dir / eval_scheme
+    scheme_dir = out_dir / f"{eval_scheme}{scheme_dir_suffix}"
     scheme_dir.mkdir(parents=True, exist_ok=True)
     for ext in ("pdf", "png"):
         out_path = scheme_dir / f"alpha_sweep_{method}_{safe_label}.{ext}"
@@ -159,17 +167,17 @@ def plot_metric(metric_key: str, metric_label: str, lower_is_better: bool,
 
 
 def _load_scheme(out_root, method, model_tag, eval_scheme,
-                 fusion_llm_tag, control):
+                 fusion_llm_tag, control, fusion_subdir="fusion"):
     """Load both norms for one eval scheme; return (results_by_norm, alphas) or None."""
     results_by_norm = {}
     alphas_ref = None
     for norm in NORMS:
         fold_data = load_fold_results(
             out_root, method, model_tag, eval_scheme,
-            fusion_llm_tag, norm, control,
+            fusion_llm_tag, norm, control, fusion_subdir,
         )
         if not fold_data:
-            print(f"  [skip] no results for scheme={eval_scheme} norm={norm}")
+            print(f"  [skip] no results for scheme={eval_scheme} norm={norm} subdir={fusion_subdir}")
             return None, None
         results_by_norm[norm] = fold_data
         first_fold = next(iter(fold_data.values()))
@@ -191,34 +199,41 @@ def main():
     p.add_argument("--llm_name",   default="HuggingFaceTB/SmolLM2-360M")
     p.add_argument("--control",    default="none")
     p.add_argument("--schemes",    nargs="+", default=["loso", "session_cv"],
-                   choices=["loso", "session_cv"],
-                   help="Eval schemes to plot (default: both)")
+                   choices=["loso", "session_cv", "stimulus"],
+                   help="Eval schemes to plot (default: loso session_cv)")
+    p.add_argument("--fusion_subdir", default="fusion",
+                   help="Subdirectory inside each checkpoint dir containing fusion JSONs "
+                        "(default: 'fusion'; use 'fusion_on_val' for validation-set results)")
     args = p.parse_args()
 
     out_root       = Path(args.out_root)
     out_dir        = Path(args.out_dir)
     fusion_llm_tag = args.fusion_llm.replace("/", "_")
     model_tag      = _model_tag(args.method, args.llm_name, args.bert_name)
+    # Append "_val" to output scheme dirs when plotting validation-set results
+    scheme_dir_suffix = "_val" if args.fusion_subdir != "fusion" else ""
 
     for eval_scheme in args.schemes:
-        print(f"\n=== {eval_scheme} ===")
-        print(f"Searching: {out_root / args.method / model_tag}/{eval_scheme}_*/fusion/")
+        print(f"\n=== {eval_scheme} (subdir={args.fusion_subdir}) ===")
+        print(f"Searching: {out_root / args.method / model_tag}/{eval_scheme}_*/{args.fusion_subdir}/")
 
         results_by_norm, alphas = _load_scheme(
             out_root, args.method, model_tag, eval_scheme,
-            fusion_llm_tag, args.control,
+            fusion_llm_tag, args.control, args.fusion_subdir,
         )
         if results_by_norm is None:
             continue
 
         fold_keys = sorted(results_by_norm[NORMS[0]].keys())
         print(f"Folds ({len(fold_keys)}): {fold_keys}")
-        print(f"Generating figures → {out_dir / eval_scheme}")
+        out_scheme_dir = out_dir / f"{eval_scheme}{scheme_dir_suffix}"
+        print(f"Generating figures → {out_scheme_dir}")
 
         for metric_key, metric_label, lower_is_better in METRICS:
             print(f"  {metric_label} ...")
             plot_metric(metric_key, metric_label, lower_is_better,
-                        alphas, results_by_norm, args.method, eval_scheme, out_dir)
+                        alphas, results_by_norm, args.method, eval_scheme, out_dir,
+                        scheme_dir_suffix)
 
     print("\nDone.")
 
