@@ -98,19 +98,34 @@ def _load_meg_trial(
     subject:   str,
     condition: str,
     session:   int,
+    meg_base:  Optional[Path] = None,
 ) -> Optional[np.ndarray]:
     """
     Load one MEG trial → (N_CHANNELS, T_ds) float32, or None if unavailable.
 
-    Preprocessing:
+    If a preprocessed .npy file exists in meg_base (e.g. icaed_Sai), it is
+    loaded directly — no MNE, no preprocessing.  Otherwise falls through to
+    the raw .fif pipeline:
       1. Collapse epoch repetitions: mean(axis=0)
       2. Downsample 10× with scipy.signal.resample
       3. Scale by 1e12 (Tesla → picoTesla range) before z-scoring so that
          float32 std does not underflow to zero for raw Tesla-scale values
       4. Z-score per channel in float64, then cast to float32
+
+    Parameters
+    ----------
+    meg_base : override for MEG_BASE (e.g. Path to icaed_Sai).  None → MEG_BASE.
     """
-    fname = f"{subject}_sess-{session}_task-{condition}_meg-epo.fif"
-    fpath = MEG_BASE / subject / f"ses-{session}" / "meg" / fname
+    base    = Path(meg_base) if meg_base is not None else MEG_BASE
+    meg_dir = base / subject / f"ses-{session}" / "meg"
+
+    # Fast path: preprocessed .npy (produced by export_preprocessed.py)
+    npy_path = meg_dir / f"{subject}_sess-{session}_task-{condition}.npy"
+    if npy_path.exists():
+        return np.load(str(npy_path))
+
+    # Slow path: raw .fif → preprocess
+    fpath = meg_dir / f"{subject}_sess-{session}_task-{condition}_meg-epo.fif"
     if not fpath.exists():
         return None
     try:
@@ -166,6 +181,7 @@ class MEGWordDataset(Dataset):
         word_filter: Optional[Dict[str, List[int]]] = None,
         augment:     bool = False,
         condition:   str  = "lis",
+        meg_base:    Optional[Path] = None,
     ):
         self.augment = augment
         self._items: List[Dict] = []
@@ -188,7 +204,7 @@ class MEGWordDataset(Dataset):
                 continue
             seen.add(key)
 
-            data = _load_meg_trial(subject, f"{poem}{condition}", session)
+            data = _load_meg_trial(subject, f"{poem}{condition}", session, meg_base=meg_base)
             if data is None:
                 n_missing += 1
                 continue
@@ -320,6 +336,7 @@ class MEGTrialDataset(Dataset):
         trials:      List[Tuple[str, str, int]],
         word_filter: Optional[Dict[str, List[int]]] = None,
         condition:   str = "lis",
+        meg_base:    Optional[Path] = None,
     ):
         self._items: List[Dict] = []
         onsets = {p: _load_onsets(p) for p in ["poem1", "poem2"]}
@@ -340,7 +357,7 @@ class MEGTrialDataset(Dataset):
                 continue
             seen.add(key)
 
-            data = _load_meg_trial(subject, f"{poem}{condition}", session)
+            data = _load_meg_trial(subject, f"{poem}{condition}", session, meg_base=meg_base)
             if data is None:
                 n_missing += 1
                 continue
