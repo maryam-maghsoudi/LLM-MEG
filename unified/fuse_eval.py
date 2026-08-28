@@ -121,6 +121,15 @@ def parse_args():
     p.add_argument("--condition", default="lis",
                    help="MEG condition suffix (default: lis)")
 
+    # Fixed evaluation vocabulary
+    p.add_argument("--closed_vocab_path", default=None,
+                   help="Path to a vocab_info.json with a 'restricted_words' key. "
+                        "When set, all trials are evaluated over this fixed vocabulary "
+                        "regardless of which words appear in the poem. MEG scores for "
+                        "out-of-trial words are set to the row minimum (ranked last). "
+                        "Output filename gets a _closed{N} suffix. "
+                        "Example: llm_twostage/cache/gpt2/vocab_info.json")
+
     return p.parse_args()
 
 
@@ -196,6 +205,26 @@ def _iter_folds(args) -> List[Dict]:
     return folds
 
 
+def _remap_to_closed_vocab(
+    meg_scores:   torch.Tensor,   # (N, |V_trial|)
+    trial_vocab:  List[str],
+    closed_vocab: List[str],
+) -> torch.Tensor:
+    """
+    Remap per-trial MEG scores to a fixed closed vocabulary.
+    Words in closed_vocab absent from the trial get the row-minimum score
+    (ranked below all in-trial words, no information).
+    """
+    N        = meg_scores.shape[0]
+    trial_idx = {w: i for i, w in enumerate(trial_vocab)}
+    row_min  = meg_scores.min(dim=-1, keepdim=True).values   # (N, 1)
+    remapped = row_min.expand(N, len(closed_vocab)).clone()
+    for j, w in enumerate(closed_vocab):
+        if w in trial_idx:
+            remapped[:, j] = meg_scores[:, trial_idx[w]]
+    return remapped
+
+
 def _scalar_summary(trial_metrics: List[Dict]) -> Dict:
     """Average key scalars over a list of per-trial metric dicts."""
     r1s  = [m["option_a"]["recall_at_k"][0] for m in trial_metrics]
@@ -222,7 +251,13 @@ def main():
     device = _resolve_device(args.device)
 
     # Alpha grid
-    alphas = args.alphas if args.alphas is not None else list(np.round(np.linspace(0, 1, 21), 3))
+    if args.alphas is not None:
+        alphas = args.alphas
+    else:
+        # Coarse grid [0.0, 0.05, ..., 0.90] + fine grid [0.91, 0.92, ..., 1.0]
+        coarse = list(np.round(np.linspace(0, 0.90, 19), 3))
+        fine   = list(np.round(np.arange(0.91, 1.001, 0.01), 3))
+        alphas = sorted(set(coarse + fine))
 
     # Fusion LLM
     fusion_llm = args.fusion_llm_name
@@ -233,12 +268,21 @@ def main():
     fusion_llm_tag = fusion_llm.replace("/", "_")
     norm_tag = args.fusion_normalization
 
+    # Closed vocabulary (optional)
+    closed_vocab: Optional[List[str]] = None
+    vocab_suffix = ""
+    if args.closed_vocab_path:
+        vocab_info   = json.loads(Path(args.closed_vocab_path).read_text())
+        closed_vocab = sorted(vocab_info["restricted_words"])
+        vocab_suffix = f"_closed{len(closed_vocab)}"
+
     print(f"\n{'='*60}")
     print(f"  method            : {args.method}")
     print(f"  eval_scheme       : {args.eval_scheme}")
     print(f"  control           : {args.control}")
     print(f"  fusion_llm        : {fusion_llm}")
     print(f"  fusion_norm       : {norm_tag}")
+    print(f"  vocab             : {'closed (%d words)' % len(closed_vocab) if closed_vocab else 'per-trial'}")
     print(f"  alphas            : {alphas}")
     print(f"{'='*60}\n")
 
@@ -275,7 +319,6 @@ def main():
 
         alpha_trial_metrics: Dict[float, List[Dict]] = {a: [] for a in alphas}
         fold_diags: List[Dict] = []
-
         for subject, poem, session in test_trials:
             print(f"  {subject} {poem} sess={session} ...", end=" ", flush=True)
 
@@ -294,11 +337,19 @@ def main():
                 continue
 
             word_texts = result["words"]
-            vocab      = result["vocab"]
-            meg_scores = result["scores"]   # Tensor(N, |V|)
             valid_mask = result["valid"]    # List[bool]
 
-            # LLM scores — compute once per poem
+            if closed_vocab is not None:
+                # Remap MEG scores to fixed vocab; out-of-trial words get row min
+                meg_scores = _remap_to_closed_vocab(
+                    result["scores"], result["vocab"], closed_vocab
+                )
+                vocab = closed_vocab
+            else:
+                meg_scores = result["scores"]   # Tensor(N, |V_trial|)
+                vocab      = result["vocab"]
+
+            # LLM scores — compute once per poem (word_texts = poem sequence, vocab = eval vocab)
             if poem not in llm_score_cache:
                 llm_score_cache[poem] = compute_llm_scores(
                     word_texts, vocab, tokenizer, llm_model, device
@@ -358,7 +409,7 @@ def main():
         # Save per-fold result alongside the checkpoint
         fusion_dir = ckpt_dir / "fusion"
         fusion_dir.mkdir(parents=True, exist_ok=True)
-        out_path = fusion_dir / f"fusion_{fusion_llm_tag}_{norm_tag}.json"
+        out_path = fusion_dir / f"fusion_{fusion_llm_tag}_{norm_tag}{vocab_suffix}.json"
 
         fold_output = {
             "meta": {
@@ -369,6 +420,8 @@ def main():
                 "control":              args.control,
                 "fusion_llm":           fusion_llm,
                 "fusion_normalization": norm_tag,
+                "vocab_type":           f"closed{len(closed_vocab)}" if closed_vocab else "per_trial",
+                "closed_vocab_path":    args.closed_vocab_path,
                 "training_llm":         args.llm_name,
                 "training_bert":        args.bert_name,
                 "condition":            args.condition,

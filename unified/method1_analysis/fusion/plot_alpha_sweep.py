@@ -84,13 +84,15 @@ def _model_tag(method: str, llm_tag: str, bert_tag: str) -> str:
 def load_fold_results(out_root: Path, method: str, model_tag: str,
                       eval_scheme: str, fusion_llm_tag: str, norm: str,
                       control: str = "none",
-                      fusion_subdir: str = "fusion") -> dict:
+                      fusion_subdir: str = "fusion",
+                      vocab_suffix: str = "") -> dict:
     """
     Glob for all per-fold fusion JSONs for the given eval scheme.
 
     Returns {fold_key: per_alpha_dict}
     where per_alpha_dict maps alpha_str → scalar_summary.
     fold_key is e.g. "sub-01" for loso or "0" for session_cv.
+    vocab_suffix is appended before .json, e.g. "_closed76".
     """
     cfg        = SCHEME_CONFIG[eval_scheme]
     ctrl_suffix = f"_ctrl_{control}" if control != "none" else ""
@@ -99,7 +101,7 @@ def load_fold_results(out_root: Path, method: str, model_tag: str,
 
     fold_data = {}
     for fold_dir in sorted(base_dir.glob(pattern)):
-        fusion_file = fold_dir / fusion_subdir / f"fusion_{fusion_llm_tag}_{norm}.json"
+        fusion_file = fold_dir / fusion_subdir / f"fusion_{fusion_llm_tag}_{norm}{vocab_suffix}.json"
         if not fusion_file.exists():
             continue
         data = json.loads(fusion_file.read_text())
@@ -183,14 +185,14 @@ def plot_metric(metric_key: str, metric_label: str, lower_is_better: bool,
 
 
 def _load_scheme(out_root, method, model_tag, eval_scheme,
-                 fusion_llm_tag, control, fusion_subdir="fusion"):
+                 fusion_llm_tag, control, fusion_subdir="fusion", vocab_suffix=""):
     """Load both norms for one eval scheme; return (results_by_norm, alphas) or None."""
     results_by_norm = {}
     alphas_ref = None
     for norm in NORMS:
         fold_data = load_fold_results(
             out_root, method, model_tag, eval_scheme,
-            fusion_llm_tag, norm, control, fusion_subdir,
+            fusion_llm_tag, norm, control, fusion_subdir, vocab_suffix,
         )
         if not fold_data:
             print(f"  [skip] no results for scheme={eval_scheme} norm={norm} subdir={fusion_subdir}")
@@ -351,6 +353,10 @@ def main():
     p.add_argument("--fusion_subdir", default="fusion",
                    help="Subdirectory inside each checkpoint dir containing fusion JSONs "
                         "(default: 'fusion'; use 'fusion_on_val' for validation-set results)")
+    p.add_argument("--vocab_suffix", default="",
+                   help="Suffix appended to the fusion JSON filename before the extension "
+                        "(e.g. '_closed76' loads fusion_gpt2_row_zscore_closed76.json). "
+                        "Default: '' (open/per-trial vocab)")
     # BLEU-diff analysis flags
     p.add_argument("--diff_test",  action="store_true",
                    help="Run BLEU(diff_alpha)−BLEU(1.0) significance analysis across "
@@ -363,6 +369,8 @@ def main():
     out_dir        = Path(args.out_dir)
     fusion_llm_tag = args.fusion_llm.replace("/", "_")
     model_tag      = _model_tag(args.method, args.llm_name, args.bert_name)
+
+    vocab_suffix = args.vocab_suffix  # e.g. "" or "_closed76"
 
     if args.diff_test:
         run_bleu_diff_analysis(
@@ -385,14 +393,16 @@ def main():
         scheme_dir_suffix = "_" + args.fusion_subdir[len("fusion_on_"):]
     else:
         scheme_dir_suffix = "_" + args.fusion_subdir
+    # Append vocab suffix so closed76 figures go to a separate folder
+    scheme_dir_suffix += vocab_suffix
 
     for eval_scheme in args.schemes:
-        print(f"\n=== {eval_scheme} (subdir={args.fusion_subdir}) ===")
+        print(f"\n=== {eval_scheme} (subdir={args.fusion_subdir}, vocab={vocab_suffix or 'per_trial'}) ===")
         print(f"Searching: {out_root / args.method / model_tag}/{eval_scheme}_*/{args.fusion_subdir}/")
 
         results_by_norm, alphas = _load_scheme(
             out_root, args.method, model_tag, eval_scheme,
-            fusion_llm_tag, args.control, args.fusion_subdir,
+            fusion_llm_tag, args.control, args.fusion_subdir, vocab_suffix,
         )
         if results_by_norm is None:
             continue
