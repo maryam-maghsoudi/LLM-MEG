@@ -358,6 +358,7 @@ def train(
     temperature:  float = TEMP,
     control:      str   = "none",
     load_stage1:  Optional[str] = None,
+    cache_dir:    Optional[str] = None,
 ) -> Dict:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -390,10 +391,16 @@ def train(
     else:
         print("\nBuilding Stage 1 datasets ...")
         t0 = time.time()
-        base_tr = MEGWordDataset(splits["train"]["trials"],
-                                  splits["train"]["word_filter"], augment=False)
-        base_vl = MEGWordDataset(splits["val"]["trials"],
-                                  splits["val"]["word_filter"],   augment=False)
+        if cache_dir is not None:
+            from pathlib import Path as _Path
+            _word_items = MEGWordDataset.load_items(str(_Path(cache_dir) / "meg_word_all.pt"))
+            base_tr = MEGWordDataset.from_cache(_word_items, splits["train"], augment=False)
+            base_vl = MEGWordDataset.from_cache(_word_items, splits["val"],   augment=False)
+        else:
+            base_tr = MEGWordDataset(splits["train"]["trials"],
+                                      splits["train"]["word_filter"], augment=False)
+            base_vl = MEGWordDataset(splits["val"]["trials"],
+                                      splits["val"]["word_filter"],   augment=False)
 
         ds_tr = LLMAugmentedDataset(base_tr, llm_caches, hmid_layer)
         ds_vl = LLMAugmentedDataset(base_vl, llm_caches, hmid_layer)
@@ -425,10 +432,16 @@ def train(
     # ── Stage 2 ──────────────────────────────────────────────────────────────
     print("\nBuilding Stage 2 datasets ...")
     t0 = time.time()
-    base_seq_tr = MEGTrialDataset(splits["train"]["trials"],
-                                   splits["train"]["word_filter"])
-    base_seq_vl = MEGTrialDataset(splits["val"]["trials"],
-                                   splits["val"]["word_filter"])
+    if cache_dir is not None:
+        from pathlib import Path as _Path
+        _trial_items = MEGTrialDataset.load_items(str(_Path(cache_dir) / "meg_trial_all.pt"))
+        base_seq_tr = MEGTrialDataset.from_cache(_trial_items, splits["train"])
+        base_seq_vl = MEGTrialDataset.from_cache(_trial_items, splits["val"])
+    else:
+        base_seq_tr = MEGTrialDataset(splits["train"]["trials"],
+                                       splits["train"]["word_filter"])
+        base_seq_vl = MEGTrialDataset(splits["val"]["trials"],
+                                       splits["val"]["word_filter"])
 
     ds_seq_tr = LLMSequenceDataset(base_seq_tr, llm_caches)
     ds_seq_vl = LLMSequenceDataset(base_seq_vl, llm_caches)

@@ -80,6 +80,11 @@ def parse_args():
     p.add_argument("--n_soft",       type=int, default=1,
                    help="Number of soft tokens per word (Method 3)")
 
+    # Cached dataset (skip FIF loading)
+    p.add_argument("--cache_dir", default=None,
+                   help="Path to unified/data/cache/ containing meg_word_all.pt "
+                        "and meg_trial_all.pt; skips raw .fif loading")
+
     # Training hyper-params (shared)
     p.add_argument("--lr",      type=float, default=None)
     p.add_argument("--epochs",  type=int,   default=None)
@@ -186,6 +191,7 @@ def main():
             bert_name = args.bert_name,
             bert_layer= args.bert_layer,
             control   = args.control,
+            cache_dir = args.cache_dir,
         )
         if args.lr:       kwargs["lr"]       = args.lr
         if args.epochs:   kwargs["epochs"]   = args.epochs
@@ -206,6 +212,7 @@ def main():
             load_stage1 = args.load_stage1,
             gru_hidden  = args.gru_hidden,
             control     = args.control,
+            cache_dir   = args.cache_dir,
         )
         if args.lr:       kwargs["s1_lr"] = kwargs["s2_lr"] = args.lr
         if args.epochs:   kwargs["s1_epochs"] = kwargs["s2_epochs"] = args.epochs
@@ -226,6 +233,7 @@ def main():
             llm_name     = args.llm_name,
             n_soft       = args.n_soft,
             control      = args.control,
+            cache_dir    = args.cache_dir,
         )
         if args.lr:       kwargs["lr"]         = args.lr
         if args.epochs:   kwargs["epochs"]     = args.epochs

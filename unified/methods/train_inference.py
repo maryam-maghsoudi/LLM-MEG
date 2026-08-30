@@ -102,6 +102,7 @@ def train(
     dropout:      float = DROPOUT,
     control:      str   = "none",
     augment:      bool  = True,
+    cache_dir:    Optional[str] = None,
 ) -> Dict:
     """
     Full Method 1 training run.
@@ -125,16 +126,22 @@ def train(
 
     print("\nBuilding datasets ...")
     t0 = time.time()
-    base_train = MEGWordDataset(
-        splits["train"]["trials"],
-        word_filter=splits["train"]["word_filter"],
-        augment=augment,
-    )
-    base_val = MEGWordDataset(
-        splits["val"]["trials"],
-        word_filter=splits["val"]["word_filter"],
-        augment=False,
-    )
+    if cache_dir is not None:
+        from pathlib import Path as _Path
+        word_items = MEGWordDataset.load_items(str(_Path(cache_dir) / "meg_word_all.pt"))
+        base_train = MEGWordDataset.from_cache(word_items, splits["train"], augment=augment)
+        base_val   = MEGWordDataset.from_cache(word_items, splits["val"],   augment=False)
+    else:
+        base_train = MEGWordDataset(
+            splits["train"]["trials"],
+            word_filter=splits["train"]["word_filter"],
+            augment=augment,
+        )
+        base_val = MEGWordDataset(
+            splits["val"]["trials"],
+            word_filter=splits["val"]["word_filter"],
+            augment=False,
+        )
     base_train = make_control(base_train, control, augment=augment)
     base_val   = make_control(base_val,   control, augment=False)
 
@@ -176,16 +183,18 @@ def train(
     print(f"  lr={lr}  bs={batch_size}  epochs={epochs}  patience={patience}")
     print(f"{'='*60}")
 
+    import pdb
     for epoch in range(1, epochs + 1):
+        pdb.set_trace()
         # ── train ────────────────────────────────────────────────────────────
         meg_enc.train()
         bert_proj.train()
         t_losses = []
-        for x, h in dl_train:
+        for x, y in dl_train:
             x = x.to(device)
-            h = h.to(device)
+            y = y.to(device)
             z = meg_enc(x)
-            t = bert_proj(h)
+            t = bert_proj(y)
             loss = info_nce(z, t, temperature)
             opt.zero_grad()
             loss.backward()
@@ -198,11 +207,11 @@ def train(
         bert_proj.eval()
         v_losses = []
         with torch.no_grad():
-            for x, h in dl_val:
+            for x, y in dl_val:
                 x = x.to(device)
-                h = h.to(device)
+                y = y.to(device)
                 z = meg_enc(x)
-                t = bert_proj(h)
+                t = bert_proj(y)
                 v_losses.append(info_nce(z, t, temperature).item())
 
         t_loss = float(np.mean(t_losses))

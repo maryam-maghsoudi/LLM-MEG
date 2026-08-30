@@ -182,6 +182,7 @@ def train(
     batch_size:     int   = BS,
     patience:       int   = PATIENCE,
     control:        str   = "none",
+    cache_dir:      Optional[str] = None,
 ) -> Dict:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -213,10 +214,16 @@ def train(
 
     print("\nBuilding datasets ...")
     t0 = time.time()
-    base_tr = MEGTrialDataset(splits["train"]["trials"],
-                               splits["train"]["word_filter"])
-    base_vl = MEGTrialDataset(splits["val"]["trials"],
-                               splits["val"]["word_filter"])
+    if cache_dir is not None:
+        from pathlib import Path as _Path
+        _trial_items = MEGTrialDataset.load_items(str(_Path(cache_dir) / "meg_trial_all.pt"))
+        base_tr = MEGTrialDataset.from_cache(_trial_items, splits["train"])
+        base_vl = MEGTrialDataset.from_cache(_trial_items, splits["val"])
+    else:
+        base_tr = MEGTrialDataset(splits["train"]["trials"],
+                                   splits["train"]["word_filter"])
+        base_vl = MEGTrialDataset(splits["val"]["trials"],
+                                   splits["val"]["word_filter"])
     base_tr = make_control(base_tr, control)
     base_vl = make_control(base_vl, control)
 
