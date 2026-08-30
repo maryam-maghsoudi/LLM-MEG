@@ -1,39 +1,45 @@
 """
-fusion.py — Log-linear fusion of MEG scores with teacher-forced LLM next-word scores.
+fusion.py — Log-linear fusion of MEG scores with LLM next-word scores.
 
-Core idea
----------
-At each word position i the LLM is run teacher-forced on the ground-truth
-tokens for words 0..i-1 and the logit for every vocab word is extracted
-(first subtoken of each word).  The MEG scores from any of the three methods
-are combined with these LLM scores via a configurable normalization + linear mix:
+Two LLM scoring modes
+---------------------
+teacher_forced (default)
+    At each position i the LLM conditions on the ground-truth tokens for
+    words 0..i-1.  Scores are identical for every subject/session of the same
+    poem, so they are computed once per poem and cached by the caller.
 
-    fused = (1 - alpha) * normalize(meg_scores) + alpha * normalize(llm_scores)
+beam (--beam_width > 0)
+    Maintains B beam histories of MEG-predicted words.  At each position t the
+    LLM conditions on each beam's own predicted history (NOT ground truth) and
+    scores the top-k MEG candidates.  Both MEG and LLM scores are normalized
+    over the trial vocabulary before mixing.  Different alphas may produce
+    different beam histories, so each alpha requires a separate beam search.
 
-alpha=0 → pure MEG, alpha=1 → pure LLM language model.
+Fusion
+------
+    fused = (1 - alpha) * normalize(meg) + alpha * normalize(llm)
+
+Both sides are normalized over the same trial vocabulary (|V| words), so the
+denominator is identical and scores are directly comparable.
 
 Normalization modes (--fusion_normalization)
 --------------------------------------------
 "logsoftmax"  (default)
-    normalize = log_softmax(·, dim=-1)
-    Product-of-experts interpretation; preserves the original behavior.
+    normalize = log_softmax(·, dim=0)  (over |V|)
 
 "row_zscore"
-    For each word position independently, standardize across vocab candidates:
-        z = (x - mean(x, dim=-1)) / (std(x, dim=-1) + eps)
-    Removes the ~200x scale gap between MEG cosine similarities and LLM logits
-    so that alpha has an interpretable effect across the full [0, 1] range.
-
-LLM scores depend only on the poem text (not on the subject or session),
-so they are computed once per poem and reused across trials.
+    z = (x - mean(x)) / (std(x) + eps)  (over |V|)
+    Removes the ~200x scale gap between MEG cosine similarities and LLM logits.
 
 Public API
 ----------
-load_fusion_llm(llm_name, device)                          → (tokenizer, model)
-compute_llm_scores(word_texts, vocab, ...)                 → Tensor(N, |V|)
-scale_diagnostics(meg_scores, llm_scores)                  → dict
-fuse_scores(meg_scores, llm_scores, alpha, normalization)  → Tensor(N, |V|)
-sweep_alphas(meg, llm, vocab, words, mask, alphas, norm)   → ({alpha: metrics}, diag)
+load_fusion_llm(llm_name, device)                                   → (tokenizer, model)
+compute_llm_scores(word_texts, vocab, ...)                          → Tensor(N, |V|)
+beam_search_fusion(meg_scores, vocab, word_texts, valid_mask, ...)  → dict
+sweep_alphas(meg, llm, vocab, words, mask, alphas, norm)            → ({alpha: metrics}, diag)
+sweep_alphas_beam(meg, vocab, words, mask, tok, model, ...)         → {alpha: dict}
+scale_diagnostics(meg_scores, llm_scores)                           → dict
+fuse_scores(meg_scores, llm_scores, alpha, normalization)           → Tensor(N, |V|)
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -108,6 +114,7 @@ def compute_llm_scores(
     # First-subtoken ID for each vocab word (with leading space for mid-BPE)
     vocab_tok_ids = []
     for w in vocab:
+        # What token ID represents this word?
         ids = tokenizer.encode(" " + w, add_special_tokens=False)
         if not ids:
             ids = tokenizer.encode(w, add_special_tokens=False)
@@ -135,6 +142,7 @@ def compute_llm_scores(
 
     input_ids = torch.tensor([all_ids], dtype=torch.long, device=device)
     logits = model(input_ids).logits[0]   # (T, vocab_size)
+    # For every token position, the LLM gives a score for every possible next token
 
     scores = torch.zeros(N, V)
     for i, b in enumerate(boundaries):
@@ -255,3 +263,180 @@ def sweep_alphas(
         b = eval_option_b(pred_top1, word_texts, valid_mask)
         results[alpha] = {"option_a": a, "option_b": b}
     return results, diag
+
+
+# ---------------------------------------------------------------------------
+#  Beam-search fusion (MEG-guided LLM context)
+# ---------------------------------------------------------------------------
+
+def _normalize_row(scores: torch.Tensor, normalization: str) -> torch.Tensor:
+    """Normalize a 1-D score vector over its own elements."""
+    x = scores.float()
+    if normalization == "logsoftmax":
+        return F.log_softmax(x, dim=0)
+    elif normalization == "row_zscore":
+        return (x - x.mean()) / (x.std() + _DIAG_EPS)
+    else:
+        raise ValueError(f"Unknown normalization: {normalization!r}")
+
+
+import pdb
+@torch.no_grad()
+def beam_search_fusion(
+    meg_scores:    torch.Tensor,    # (N, |V|)
+    vocab:         List[str],
+    word_texts:    List[str],       # ground truth — evaluation only, never used as context
+    valid_mask:    List[bool],
+    tokenizer,
+    model,
+    device:        torch.device,
+    alpha:         float,
+    beam_width:    int = 5,
+    top_k:         int = 5,
+    normalization: str = "logsoftmax",
+) -> Dict:
+    """
+    MEG-guided beam-search fusion.
+
+    At each position t:
+      1. Normalize MEG scores over the trial vocab (|V| words).
+         At valid positions keep the top-k MEG candidates.
+         At invalid positions (no MEG signal) expand over the full vocab so
+         the LLM can select freely rather than from an arbitrary top-k subset.
+      2. Batch the B beam histories and run a single LLM forward pass.
+         Extract logits for the trial vocab only, then normalize over |V|.
+         Both MEG and LLM are now on the same |V|-dimensional scale.
+      3. fused = (1-alpha)*meg_norm[candidate] + alpha*llm_norm[candidate]
+      4. B × n_candidates → keep top-B beams by cumulative fused score.
+
+    Returns
+    -------
+    dict:
+        pred_sequence : List[str]   best-beam predicted word sequence
+        cum_score     : float       cumulative fused log-score
+        option_b      : dict        word_accuracy, bleu1, wer vs ground truth
+    """
+    N = meg_scores.shape[0]
+    V = len(vocab)
+    k = min(top_k, V)
+
+    # First-subtoken ID for each trial-vocab word (for LLM logit extraction)
+    vocab_tok_ids: List[int] = []
+    for w in vocab:
+        ids = tokenizer.encode(" " + w, add_special_tokens=False)
+        if not ids:
+            ids = tokenizer.encode(w, add_special_tokens=False)
+        vocab_tok_ids.append(ids[0] if ids else (tokenizer.unk_token_id or 0))
+    vocab_tok_ids_t = torch.tensor(vocab_tok_ids, dtype=torch.long, device=device)
+
+    # Full subword IDs per vocab word (for appending to beam context)
+    word_to_tids: Dict[str, List[int]] = {}
+    for w in vocab:
+        ids = tokenizer.encode(" " + w, add_special_tokens=False)
+        word_to_tids[w] = ids if ids else [tokenizer.unk_token_id or 0]
+
+    bos: List[int] = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
+
+    # One beam with empty history
+    beams: List[Dict] = [{"history": [], "token_ids": list(bos), "cum_score": 0.0}]
+
+    for t in range(N):
+        pdb.set_trace()
+        # ── MEG scores ────────────────────────────────────────────────────────
+        meg_row = meg_scores[t].to(device).float()   # (|V|,)
+        if valid_mask[t]:
+            meg_norm     = _normalize_row(meg_row, normalization)
+            topk_indices = meg_norm.topk(k).indices           # (k,)
+        else:
+            # No MEG signal: zero contribution; expand over full vocab so the
+            # LLM (not an arbitrary MEG top-k) decides the candidate set.
+            meg_norm     = torch.zeros(V, device=device)
+            topk_indices = torch.arange(V, device=device)    # (V,)
+
+        n_cands = topk_indices.shape[0]
+
+        # ── LLM scores (batched over beams) ──────────────────────────────────
+        batch_ids = [b["token_ids"] for b in beams]
+        max_len   = max((len(ids) for ids in batch_ids), default=0)
+
+        if max_len == 0:
+            # No context (no BOS, t=0): uniform LLM contribution
+            llm_vocab_norm = torch.zeros(len(beams), V, device=device)
+        else:
+            nb   = len(beams)
+            pad  = torch.zeros(nb, max_len, dtype=torch.long, device=device)
+            mask = torch.zeros(nb, max_len, dtype=torch.long, device=device)
+            for i, ids in enumerate(batch_ids):
+                if ids:
+                    pad[i, :len(ids)]  = torch.tensor(ids, dtype=torch.long, device=device)
+                    mask[i, :len(ids)] = 1
+
+            logits = model(pad, attention_mask=mask).logits   # (nb, max_len, llm_V)
+
+            last_pos    = [max(0, len(ids) - 1) for ids in batch_ids]
+            last_logits = torch.stack(
+                [logits[i, last_pos[i]] for i in range(nb)]
+            )                                                  # (nb, llm_V)
+
+            # Extract trial vocab only, then normalize over it
+            llm_vocab_scores = last_logits[:, vocab_tok_ids_t]   # (nb, |V|)
+            llm_vocab_norm   = torch.stack([
+                _normalize_row(llm_vocab_scores[bi], normalization)
+                for bi in range(nb)
+            ])                                                     # (nb, |V|)
+
+        # ── Expand beams ──────────────────────────────────────────────────────
+        candidates: List[Dict] = []
+        for bi, beam in enumerate(beams):
+            for j in range(n_cands):
+                wi    = topk_indices[j].item()
+                word  = vocab[wi]
+                fused = ((1.0 - alpha) * meg_norm[wi].item()
+                         + alpha * llm_vocab_norm[bi, wi].item())
+                candidates.append({
+                    "history":   beam["history"] + [word],
+                    "token_ids": beam["token_ids"] + word_to_tids[word],
+                    "cum_score": beam["cum_score"] + fused,
+                })
+
+        candidates.sort(key=lambda c: c["cum_score"], reverse=True)
+        beams = candidates[:beam_width]
+
+    best      = beams[0]
+    b_metrics = eval_option_b(best["history"], word_texts, valid_mask)
+    return {
+        "pred_sequence": best["history"],
+        "cum_score":     float(best["cum_score"]),
+        "option_b":      b_metrics,
+    }
+
+
+def sweep_alphas_beam(
+    meg_scores:    torch.Tensor,
+    vocab:         List[str],
+    word_texts:    List[str],
+    valid_mask:    List[bool],
+    tokenizer,
+    model,
+    device:        torch.device,
+    alphas:        List[float],
+    beam_width:    int = 5,
+    top_k:         int = 5,
+    normalization: str = "logsoftmax",
+) -> Dict[float, Dict]:
+    """
+    Run beam_search_fusion independently for each alpha value.
+
+    Each alpha may produce a different sequence because the beam history
+    (which determines the LLM context) depends on which candidates win at
+    each step, which in turn depends on alpha.
+    """
+    return {
+        alpha: beam_search_fusion(
+            meg_scores, vocab, word_texts, valid_mask,
+            tokenizer, model, device,
+            alpha=alpha, beam_width=beam_width, top_k=top_k,
+            normalization=normalization,
+        )
+        for alpha in alphas
+    }

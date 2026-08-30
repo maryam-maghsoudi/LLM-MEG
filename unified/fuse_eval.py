@@ -67,7 +67,9 @@ from unified.data.splits import (
     make_loso_splits, make_session_cv_splits, make_stimulus_splits, SUBJECTS,
 )
 from unified.predict import predict
-from unified.methods.fusion import load_fusion_llm, compute_llm_scores, sweep_alphas
+from unified.methods.fusion import (
+    load_fusion_llm, compute_llm_scores, sweep_alphas, sweep_alphas_beam,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +131,15 @@ def parse_args():
                         "out-of-trial words are set to the row minimum (ranked last). "
                         "Output filename gets a _closed{N} suffix. "
                         "Example: llm_twostage/cache/gpt2/vocab_info.json")
+
+    # Beam-search fusion (MEG-guided LLM context)
+    p.add_argument("--beam_width", type=int, default=0,
+                   help="Beam width for MEG-guided beam-search fusion. "
+                        "0 (default) = disabled; use teacher-forced LLM scores instead. "
+                        "Output written to fusion_beam{B}_top{k}_*.json.")
+    p.add_argument("--top_k", type=int, default=5,
+                   help="MEG top-k candidates to consider at each beam step "
+                        "(ignored when beam_width=0)")
 
     return p.parse_args()
 
@@ -226,7 +237,7 @@ def _remap_to_closed_vocab(
 
 
 def _scalar_summary(trial_metrics: List[Dict]) -> Dict:
-    """Average key scalars over a list of per-trial metric dicts."""
+    """Average key scalars over a list of per-trial metric dicts (teacher-forced path)."""
     r1s  = [m["option_a"]["recall_at_k"][0] for m in trial_metrics]
     mrrs = [m["option_a"]["mrr"]             for m in trial_metrics]
     accs = [m["option_b"]["word_accuracy"]   for m in trial_metrics]
@@ -242,6 +253,19 @@ def _scalar_summary(trial_metrics: List[Dict]) -> Dict:
     }
 
 
+def _scalar_summary_beam(trial_metrics: List[Dict]) -> Dict:
+    """Average option_b scalars over a list of beam-search trial results."""
+    accs = [m["option_b"]["word_accuracy"] for m in trial_metrics]
+    bleu = [m["option_b"]["bleu1"]         for m in trial_metrics]
+    wers = [m["option_b"]["wer"]           for m in trial_metrics]
+    return {
+        "mean_accuracy": float(np.mean(accs)),
+        "mean_BLEU1":    float(np.mean(bleu)),
+        "mean_WER":      float(np.mean(wers)),
+        "n_trials":      len(trial_metrics),
+    }
+
+
 # ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
@@ -250,11 +274,12 @@ def main():
     args   = parse_args()
     device = _resolve_device(args.device)
 
+    beam_mode = args.beam_width > 0
+
     # Alpha grid
     if args.alphas is not None:
         alphas = args.alphas
     else:
-        # Coarse grid [0.0, 0.05, ..., 0.90] + fine grid [0.91, 0.92, ..., 1.0]
         coarse = list(np.round(np.linspace(0, 0.90, 19), 3))
         fine   = list(np.round(np.arange(0.91, 1.001, 0.01), 3))
         alphas = sorted(set(coarse + fine))
@@ -282,20 +307,21 @@ def main():
     print(f"  control           : {args.control}")
     print(f"  fusion_llm        : {fusion_llm}")
     print(f"  fusion_norm       : {norm_tag}")
+    if beam_mode:
+        print(f"  beam_width        : {args.beam_width}")
+        print(f"  top_k             : {args.top_k}")
     print(f"  vocab             : {'closed (%d words)' % len(closed_vocab) if closed_vocab else 'per-trial'}")
     print(f"  alphas            : {alphas}")
     print(f"{'='*60}\n")
 
-    # Collect fold descriptors
     folds = _iter_folds(args)
     print(f"  n_folds           : {len(folds)}\n")
 
-    # LLM scores depend only on poem text, so cache per poem
+    # Per-poem LLM cache (teacher-forced only — beam mode recomputes per trial)
     llm_score_cache: Dict[str, torch.Tensor] = {}
     vocab_cache: Dict[str, List[str]] = {}
 
-    # For aggregate table across folds
-    per_fold_summary: Dict[str, Dict] = {}   # fold_key → {alpha_str: scalar_summary}
+    per_fold_summary: Dict[str, Dict] = {}
     all_diags: List[Dict] = []
 
     for fold_info in folds:
@@ -311,7 +337,6 @@ def main():
             print(f"  [skip] checkpoint dir not found: {ckpt_dir}")
             continue
 
-        # Unique test trials for this fold
         test_trials = sorted(set(
             (s, poem, sess)
             for s, poem, sess in splits["test"]["trials"]
@@ -319,6 +344,8 @@ def main():
 
         alpha_trial_metrics: Dict[float, List[Dict]] = {a: [] for a in alphas}
         fold_diags: List[Dict] = []
+        n_successful = 0
+
         for subject, poem, session in test_trials:
             print(f"  {subject} {poem} sess={session} ...", end=" ", flush=True)
 
@@ -337,52 +364,72 @@ def main():
                 continue
 
             word_texts = result["words"]
-            valid_mask = result["valid"]    # List[bool]
+            valid_mask = result["valid"]
 
             if closed_vocab is not None:
-                # Remap MEG scores to fixed vocab; out-of-trial words get row min
                 meg_scores = _remap_to_closed_vocab(
                     result["scores"], result["vocab"], closed_vocab
                 )
                 vocab = closed_vocab
             else:
-                meg_scores = result["scores"]   # Tensor(N, |V_trial|)
+                meg_scores = result["scores"]
                 vocab      = result["vocab"]
 
-            # LLM scores — compute once per poem (word_texts = poem sequence, vocab = eval vocab)
-            if poem not in llm_score_cache:
-                llm_score_cache[poem] = compute_llm_scores(
-                    word_texts, vocab, tokenizer, llm_model, device
+            if beam_mode:
+                # ── Beam search: LLM conditioned on MEG-predicted history ────
+                trial_sweep = sweep_alphas_beam(
+                    meg_scores, vocab, word_texts, valid_mask,
+                    tokenizer, llm_model, device, alphas,
+                    beam_width=args.beam_width,
+                    top_k=args.top_k,
+                    normalization=norm_tag,
                 )
-                vocab_cache[poem] = vocab
+                a_min, a_max = min(alphas), max(alphas)
+                acc_lo = trial_sweep[a_min]["option_b"]["word_accuracy"]
+                acc_hi = trial_sweep[a_max]["option_b"]["word_accuracy"]
+                print(f"acc  alpha={a_min:.2f}:{acc_lo:.3f}  "
+                      f"alpha={a_max:.2f}:{acc_hi:.3f}")
+            else:
+                # ── Teacher-forced: LLM conditioned on ground-truth history ──
+                if poem not in llm_score_cache:
+                    llm_score_cache[poem] = compute_llm_scores(
+                        word_texts, vocab, tokenizer, llm_model, device
+                    )
+                    vocab_cache[poem] = vocab
 
-            llm_scores = llm_score_cache[poem]
+                llm_scores = llm_score_cache[poem]
 
-            if vocab != vocab_cache[poem]:
-                print(f"SKIP (vocab mismatch for {poem})")
-                continue
+                if vocab != vocab_cache[poem]:
+                    print(f"SKIP (vocab mismatch for {poem})")
+                    continue
 
-            trial_sweep, trial_diag = sweep_alphas(
-                meg_scores, llm_scores, vocab, word_texts, valid_mask, alphas,
-                normalization=norm_tag,
-            )
-            fold_diags.append(trial_diag)
-            all_diags.append(trial_diag)
+                trial_sweep, trial_diag = sweep_alphas(
+                    meg_scores, llm_scores, vocab, word_texts, valid_mask, alphas,
+                    normalization=norm_tag,
+                )
+                fold_diags.append(trial_diag)
+                all_diags.append(trial_diag)
 
-            r1_meg = trial_sweep[0.0]["option_a"]["recall_at_k"][0]
-            r1_llm = trial_sweep[1.0]["option_a"]["recall_at_k"][0]
-            print(f"R@1  meg={r1_meg:.3f}  llm={r1_llm:.3f}  "
-                  f"scale_ratio={trial_diag['mean_scale_ratio']:.1f}x")
+                a_min, a_max = min(alphas), max(alphas)
+                r1_lo = trial_sweep[a_min]["option_a"]["recall_at_k"][0]
+                r1_hi = trial_sweep[a_max]["option_a"]["recall_at_k"][0]
+                print(f"R@1  alpha={a_min:.2f}:{r1_lo:.3f}  "
+                      f"alpha={a_max:.2f}:{r1_hi:.3f}  "
+                      f"scale_ratio={trial_diag['mean_scale_ratio']:.1f}x")
 
             for alpha, metrics in trial_sweep.items():
                 alpha_trial_metrics[alpha].append(metrics)
+            n_successful += 1
 
-        # Summarise this fold per alpha
+        # Fold summary
         fold_summary: Dict[str, Dict] = {}
         for alpha in alphas:
             trial_list = alpha_trial_metrics[alpha]
             if trial_list:
-                fold_summary[str(alpha)] = _scalar_summary(trial_list)
+                fold_summary[str(alpha)] = (
+                    _scalar_summary_beam(trial_list) if beam_mode
+                    else _scalar_summary(trial_list)
+                )
 
         if not fold_summary:
             print(f"  [skip] no results collected for fold {fold_key}")
@@ -390,53 +437,66 @@ def main():
 
         per_fold_summary[fold_key] = fold_summary
 
-        # Print fold summary at best alpha (by R@1)
-        best_alpha = max(
-            (a for a in alphas if str(a) in fold_summary),
-            key=lambda a: fold_summary[str(a)]["mean_R@1"],
-        )
-        bs = fold_summary[str(best_alpha)]
-        print(f"  fold={fold_key}  best_alpha={best_alpha}"
-              f"  R@1={bs['mean_R@1']:.3f}  MRR={bs['mean_MRR']:.3f}")
+        if beam_mode:
+            best_alpha = max(
+                (a for a in alphas if str(a) in fold_summary),
+                key=lambda a: fold_summary[str(a)]["mean_accuracy"],
+            )
+            bs = fold_summary[str(best_alpha)]
+            print(f"  fold={fold_key}  best_alpha={best_alpha}"
+                  f"  acc={bs['mean_accuracy']:.3f}  BLEU={bs['mean_BLEU1']:.3f}"
+                  f"  WER={bs['mean_WER']:.3f}")
+        else:
+            best_alpha = max(
+                (a for a in alphas if str(a) in fold_summary),
+                key=lambda a: fold_summary[str(a)]["mean_R@1"],
+            )
+            bs = fold_summary[str(best_alpha)]
+            print(f"  fold={fold_key}  best_alpha={best_alpha}"
+                  f"  R@1={bs['mean_R@1']:.3f}  MRR={bs['mean_MRR']:.3f}")
 
-        # Aggregate scale diagnostics for this fold
+        # Scale diagnostics (teacher-forced only)
         fold_diag_agg: Dict = {}
-        if fold_diags:
+        if not beam_mode and fold_diags:
             for key in fold_diags[0]:
                 fold_diag_agg[key] = float(np.mean([d[key] for d in fold_diags]))
             fold_diag_agg["n_trials"] = len(fold_diags)
 
-        # Save per-fold result alongside the checkpoint
+        # Output path
+        beam_tag = f"_beam{args.beam_width}_top{args.top_k}" if beam_mode else ""
         fusion_dir = ckpt_dir / "fusion"
         fusion_dir.mkdir(parents=True, exist_ok=True)
-        out_path = fusion_dir / f"fusion_{fusion_llm_tag}_{norm_tag}{vocab_suffix}.json"
+        out_path = fusion_dir / f"fusion{beam_tag}_{fusion_llm_tag}_{norm_tag}{vocab_suffix}.json"
 
-        fold_output = {
-            "meta": {
-                "method":               args.method,
-                "eval_scheme":          args.eval_scheme,
-                "heldout":              heldout,
-                "fold":                 fold_k,
-                "control":              args.control,
-                "fusion_llm":           fusion_llm,
-                "fusion_normalization": norm_tag,
-                "vocab_type":           f"closed{len(closed_vocab)}" if closed_vocab else "per_trial",
-                "closed_vocab_path":    args.closed_vocab_path,
-                "training_llm":         args.llm_name,
-                "training_bert":        args.bert_name,
-                "condition":            args.condition,
-                "alphas":               alphas,
-                "n_trials":             len(fold_diags),
-            },
-            "alphas":            alphas,
-            "scale_diagnostics": fold_diag_agg,
-            "per_alpha":         fold_summary,
+        meta: Dict = {
+            "method":               args.method,
+            "eval_scheme":          args.eval_scheme,
+            "heldout":              heldout,
+            "fold":                 fold_k,
+            "control":              args.control,
+            "fusion_llm":           fusion_llm,
+            "fusion_normalization": norm_tag,
+            "vocab_type":           f"closed{len(closed_vocab)}" if closed_vocab else "per_trial",
+            "closed_vocab_path":    args.closed_vocab_path,
+            "training_llm":         args.llm_name,
+            "training_bert":        args.bert_name,
+            "condition":            args.condition,
+            "alphas":               alphas,
+            "n_trials":             n_successful,
         }
+        if beam_mode:
+            meta["beam_width"] = args.beam_width
+            meta["top_k"]      = args.top_k
+
+        fold_output: Dict = {"meta": meta, "alphas": alphas, "per_alpha": fold_summary}
+        if not beam_mode:
+            fold_output["scale_diagnostics"] = fold_diag_agg
+
         out_path.write_text(json.dumps(fold_output, indent=2))
         print(f"  saved → {out_path}")
 
     # ---------------------------------------------------------------------------
-    #  Aggregate across folds and print summary table
+    #  Aggregate across folds
     # ---------------------------------------------------------------------------
     if not per_fold_summary:
         print("\n[warn] No fold results collected.")
@@ -445,43 +505,73 @@ def main():
     aggregate: Dict[str, Dict] = {}
     for alpha in alphas:
         a_str = str(alpha)
-        fold_r1s  = [per_fold_summary[fk][a_str]["mean_R@1"]
-                     for fk in per_fold_summary if a_str in per_fold_summary[fk]]
-        fold_mrrs = [per_fold_summary[fk][a_str]["mean_MRR"]
-                     for fk in per_fold_summary if a_str in per_fold_summary[fk]]
-        fold_accs = [per_fold_summary[fk][a_str]["mean_accuracy"]
-                     for fk in per_fold_summary if a_str in per_fold_summary[fk]]
-        if not fold_r1s:
-            continue
-        aggregate[a_str] = {
-            "mean_R@1":      float(np.mean(fold_r1s)),
-            "std_R@1":       float(np.std(fold_r1s)),
-            "mean_MRR":      float(np.mean(fold_mrrs)),
-            "std_MRR":       float(np.std(fold_mrrs)),
-            "mean_accuracy": float(np.mean(fold_accs)),
-            "n_folds":       len(fold_r1s),
-        }
+        if beam_mode:
+            fold_accs = [per_fold_summary[fk][a_str]["mean_accuracy"]
+                         for fk in per_fold_summary if a_str in per_fold_summary[fk]]
+            fold_bleu = [per_fold_summary[fk][a_str]["mean_BLEU1"]
+                         for fk in per_fold_summary if a_str in per_fold_summary[fk]]
+            fold_wers = [per_fold_summary[fk][a_str]["mean_WER"]
+                         for fk in per_fold_summary if a_str in per_fold_summary[fk]]
+            if not fold_accs:
+                continue
+            aggregate[a_str] = {
+                "mean_accuracy": float(np.mean(fold_accs)),
+                "std_accuracy":  float(np.std(fold_accs)),
+                "mean_BLEU1":    float(np.mean(fold_bleu)),
+                "mean_WER":      float(np.mean(fold_wers)),
+                "n_folds":       len(fold_accs),
+            }
+        else:
+            fold_r1s  = [per_fold_summary[fk][a_str]["mean_R@1"]
+                         for fk in per_fold_summary if a_str in per_fold_summary[fk]]
+            fold_mrrs = [per_fold_summary[fk][a_str]["mean_MRR"]
+                         for fk in per_fold_summary if a_str in per_fold_summary[fk]]
+            fold_accs = [per_fold_summary[fk][a_str]["mean_accuracy"]
+                         for fk in per_fold_summary if a_str in per_fold_summary[fk]]
+            if not fold_r1s:
+                continue
+            aggregate[a_str] = {
+                "mean_R@1":      float(np.mean(fold_r1s)),
+                "std_R@1":       float(np.std(fold_r1s)),
+                "mean_MRR":      float(np.mean(fold_mrrs)),
+                "std_MRR":       float(np.std(fold_mrrs)),
+                "mean_accuracy": float(np.mean(fold_accs)),
+                "n_folds":       len(fold_r1s),
+            }
 
-    print(f"\n{'alpha':>8}  {'R@1':>8}  {'±':>6}  {'MRR':>8}  {'±':>6}")
-    print("-" * 45)
-    for alpha in alphas:
-        a_str = str(alpha)
-        if a_str not in aggregate:
-            continue
-        ag = aggregate[a_str]
-        print(f"{alpha:>8.2f}  {ag['mean_R@1']:>8.4f}  "
-              f"{ag['std_R@1']:>6.4f}  {ag['mean_MRR']:>8.4f}  "
-              f"{ag['std_MRR']:>6.4f}")
+    if beam_mode:
+        print(f"\n{'alpha':>8}  {'acc':>8}  {'±':>6}  {'BLEU-1':>8}  {'WER':>8}")
+        print("-" * 50)
+        for alpha in alphas:
+            a_str = str(alpha)
+            if a_str not in aggregate:
+                continue
+            ag = aggregate[a_str]
+            print(f"{alpha:>8.2f}  {ag['mean_accuracy']:>8.4f}  "
+                  f"{ag['std_accuracy']:>6.4f}  {ag['mean_BLEU1']:>8.4f}  "
+                  f"{ag['mean_WER']:>8.4f}")
+        best_alpha = max(aggregate, key=lambda a: aggregate[a]["mean_accuracy"])
+        print(f"\nBest alpha = {best_alpha}  acc = {aggregate[best_alpha]['mean_accuracy']:.4f}")
+    else:
+        print(f"\n{'alpha':>8}  {'R@1':>8}  {'±':>6}  {'MRR':>8}  {'±':>6}")
+        print("-" * 45)
+        for alpha in alphas:
+            a_str = str(alpha)
+            if a_str not in aggregate:
+                continue
+            ag = aggregate[a_str]
+            print(f"{alpha:>8.2f}  {ag['mean_R@1']:>8.4f}  "
+                  f"{ag['std_R@1']:>6.4f}  {ag['mean_MRR']:>8.4f}  "
+                  f"{ag['std_MRR']:>6.4f}")
+        best_alpha = max(aggregate, key=lambda a: aggregate[a]["mean_R@1"])
+        print(f"\nBest alpha = {best_alpha}  R@1 = {aggregate[best_alpha]['mean_R@1']:.4f}")
 
-    best_alpha = max(aggregate, key=lambda a: aggregate[a]["mean_R@1"])
-    print(f"\nBest alpha = {best_alpha}  R@1 = {aggregate[best_alpha]['mean_R@1']:.4f}")
-
-    if all_diags:
-        print(f"\nScale diagnostics ({norm_tag}):")
-        print(f"  mean MEG row std : {np.mean([d['mean_meg_row_std'] for d in all_diags]):.4f}")
-        print(f"  mean LLM row std : {np.mean([d['mean_llm_row_std'] for d in all_diags]):.4f}")
-        print(f"  mean ratio       : {np.mean([d['mean_scale_ratio'] for d in all_diags]):.1f}x")
-        print(f"  median ratio     : {np.median([d['median_scale_ratio'] for d in all_diags]):.1f}x")
+        if all_diags:
+            print(f"\nScale diagnostics ({norm_tag}):")
+            print(f"  mean MEG row std : {np.mean([d['mean_meg_row_std'] for d in all_diags]):.4f}")
+            print(f"  mean LLM row std : {np.mean([d['mean_llm_row_std'] for d in all_diags]):.4f}")
+            print(f"  mean ratio       : {np.mean([d['mean_scale_ratio'] for d in all_diags]):.1f}x")
+            print(f"  median ratio     : {np.median([d['median_scale_ratio'] for d in all_diags]):.1f}x")
 
 
 if __name__ == "__main__":
