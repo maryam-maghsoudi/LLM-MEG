@@ -19,15 +19,28 @@ Figures are saved to:
 splits, run one-sided Wilcoxon signed-rank test (H1: median > 0), and plot distributions.
 Useful for testing whether the MEG signal contributes beyond pure LLM at a given alpha.
 
+Figure output layout:
+    figures/smolLM/{eval_scheme}/          SmolLM2, test set (default)
+    figures/smolLM/{eval_scheme}_val/      SmolLM2, val set
+    figures/gpt2/{eval_scheme}/            GPT-2, open (per-trial) vocab
+    figures/gpt2/{eval_scheme}_closed76/   GPT-2, closed 76-word vocab
+
 Usage (from llm_decoder/):
+    # SmolLM2 (default --out_dir figures/smolLM)
     python -m unified.method1_analysis.fusion.plot_alpha_sweep
     python -m unified.method1_analysis.fusion.plot_alpha_sweep \\
-        --method inference \\
-        --out_root unified/out \\
-        --out_dir unified/method1_analysis/fusion/figures
+        --fusion_subdir fusion_on_val --schemes loso session_cv
+
+    # GPT-2, open vocab
     python -m unified.method1_analysis.fusion.plot_alpha_sweep \\
-        --fusion_subdir fusion_on_val \\
-        --schemes loso session_cv stimulus
+        --fusion_llm gpt2 --out_dir unified/method1_analysis/fusion/figures/gpt2
+
+    # GPT-2, closed 76-word vocab
+    python -m unified.method1_analysis.fusion.plot_alpha_sweep \\
+        --fusion_llm gpt2 --vocab_suffix _closed76 \\
+        --out_dir unified/method1_analysis/fusion/figures/gpt2
+
+    # Significance test (BLEU diff analysis)
     python -m unified.method1_analysis.fusion.plot_alpha_sweep --diff_test
     python -m unified.method1_analysis.fusion.plot_alpha_sweep --diff_test --diff_alpha 0.5
 """
@@ -45,7 +58,7 @@ from scipy import stats
 
 _HERE     = Path(__file__).parent
 _OUT_ROOT = _HERE.parent.parent / "out"
-_OUT_DIR  = _HERE / "figures"
+_OUT_DIR  = _HERE / "figures" / "smolLM"   # default; use --out_dir figures/gpt2 for GPT-2 runs
 
 METRICS = [
     ("mean_R@1",      "R@1",          False),   # (json_key, label, lower_is_better)

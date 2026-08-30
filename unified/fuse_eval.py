@@ -140,6 +140,11 @@ def parse_args():
     p.add_argument("--top_k", type=int, default=5,
                    help="MEG top-k candidates to consider at each beam step "
                         "(ignored when beam_width=0)")
+    p.add_argument("--no_repeat_ngram", type=int, default=0,
+                   help="Block repeated n-grams of this length during beam search. "
+                        "0 (default) = disabled. 2 = no consecutive word repeats "
+                        "(e.g. 'flash flash'). 3 = no repeated trigrams. "
+                        "Ignored when beam_width=0.")
 
     return p.parse_args()
 
@@ -310,6 +315,7 @@ def main():
     if beam_mode:
         print(f"  beam_width        : {args.beam_width}")
         print(f"  top_k             : {args.top_k}")
+        print(f"  no_repeat_ngram   : {args.no_repeat_ngram if args.no_repeat_ngram > 0 else 'disabled'}")
     print(f"  vocab             : {'closed (%d words)' % len(closed_vocab) if closed_vocab else 'per-trial'}")
     print(f"  alphas            : {alphas}")
     print(f"{'='*60}\n")
@@ -344,6 +350,7 @@ def main():
 
         alpha_trial_metrics: Dict[float, List[Dict]] = {a: [] for a in alphas}
         fold_diags: List[Dict] = []
+        trial_records: List[Dict] = []   # beam mode only: per-trial sequences
         n_successful = 0
 
         for subject, poem, session in test_trials:
@@ -383,12 +390,24 @@ def main():
                     beam_width=args.beam_width,
                     top_k=args.top_k,
                     normalization=norm_tag,
+                    no_repeat_ngram=args.no_repeat_ngram,
                 )
                 a_min, a_max = min(alphas), max(alphas)
                 acc_lo = trial_sweep[a_min]["option_b"]["word_accuracy"]
                 acc_hi = trial_sweep[a_max]["option_b"]["word_accuracy"]
                 print(f"acc  alpha={a_min:.2f}:{acc_lo:.3f}  "
                       f"alpha={a_max:.2f}:{acc_hi:.3f}")
+
+                trial_records.append({
+                    "subject":      subject,
+                    "poem":         poem,
+                    "session":      session,
+                    "ground_truth": word_texts,
+                    "valid_mask":   valid_mask,
+                    "predictions":  {
+                        str(a): trial_sweep[a]["pred_sequence"] for a in alphas
+                    },
+                })
             else:
                 # ── Teacher-forced: LLM conditioned on ground-truth history ──
                 if poem not in llm_score_cache:
@@ -463,7 +482,8 @@ def main():
             fold_diag_agg["n_trials"] = len(fold_diags)
 
         # Output path
-        beam_tag = f"_beam{args.beam_width}_top{args.top_k}" if beam_mode else ""
+        ngram_tag = f"_norep{args.no_repeat_ngram}" if beam_mode and args.no_repeat_ngram > 0 else ""
+        beam_tag  = f"_beam{args.beam_width}_top{args.top_k}{ngram_tag}" if beam_mode else ""
         fusion_dir = ckpt_dir / "fusion"
         fusion_dir.mkdir(parents=True, exist_ok=True)
         out_path = fusion_dir / f"fusion{beam_tag}_{fusion_llm_tag}_{norm_tag}{vocab_suffix}.json"
@@ -485,15 +505,38 @@ def main():
             "n_trials":             n_successful,
         }
         if beam_mode:
-            meta["beam_width"] = args.beam_width
-            meta["top_k"]      = args.top_k
+            meta["beam_width"]       = args.beam_width
+            meta["top_k"]            = args.top_k
+            meta["no_repeat_ngram"]  = args.no_repeat_ngram
 
         fold_output: Dict = {"meta": meta, "alphas": alphas, "per_alpha": fold_summary}
         if not beam_mode:
             fold_output["scale_diagnostics"] = fold_diag_agg
+        if beam_mode and trial_records:
+            fold_output["per_trial"] = trial_records
 
         out_path.write_text(json.dumps(fold_output, indent=2))
         print(f"  saved → {out_path}")
+
+        # Write a human-readable text file of predicted sequences (beam mode only)
+        if beam_mode and trial_records:
+            txt_path = out_path.with_suffix(".txt")
+            lines = []
+            for rec in trial_records:
+                lines.append(
+                    f"subject={rec['subject']}  poem={rec['poem']}  session={rec['session']}"
+                )
+                truth_str = " ".join(
+                    f"[{w}]" if not v else w
+                    for w, v in zip(rec["ground_truth"], rec["valid_mask"])
+                )
+                lines.append(f"  truth  : {truth_str}")
+                for a in alphas:
+                    pred_str = " ".join(rec["predictions"][str(a)])
+                    lines.append(f"  α={a:.2f} : {pred_str}")
+                lines.append("")
+            txt_path.write_text("\n".join(lines))
+            print(f"  saved → {txt_path}")
 
     # ---------------------------------------------------------------------------
     #  Aggregate across folds

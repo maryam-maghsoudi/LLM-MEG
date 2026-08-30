@@ -6,9 +6,9 @@ For each heldout subject: 2 trials from poem1, 2 trials from poem2.
 Words are colour-coded: green = correct, red = wrong, grey = invalid MEG window.
 
 Usage (from llm_decoder/ parent):
-    python -m unified.inference_analysis.visualize_predictions
-    python -m unified.inference_analysis.visualize_predictions --sessions 0 5
-    python -m unified.inference_analysis.visualize_predictions --no_figs   # text only
+    python -m unified.method1_analysis.visualize_predictions
+    python -m unified.method1_analysis.visualize_predictions --sessions 0 5
+    python -m unified.method1_analysis.visualize_predictions --no_figs   # text only
 """
 
 import argparse

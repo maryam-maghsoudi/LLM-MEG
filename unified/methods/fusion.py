@@ -280,20 +280,31 @@ def _normalize_row(scores: torch.Tensor, normalization: str) -> torch.Tensor:
         raise ValueError(f"Unknown normalization: {normalization!r}")
 
 
-import pdb
+def _would_repeat_ngram(history: List[str], word: str, n: int) -> bool:
+    """Return True if appending word to history would create a repeated n-gram."""
+    if n <= 0 or len(history) < n - 1:
+        return False
+    ngram = tuple(history[-(n - 1):]) + (word,)
+    for i in range(len(history) - n + 1):
+        if tuple(history[i:i + n]) == ngram:
+            return True
+    return False
+
+
 @torch.no_grad()
 def beam_search_fusion(
-    meg_scores:    torch.Tensor,    # (N, |V|)
-    vocab:         List[str],
-    word_texts:    List[str],       # ground truth — evaluation only, never used as context
-    valid_mask:    List[bool],
+    meg_scores:       torch.Tensor,    # (N, |V|)
+    vocab:            List[str],
+    word_texts:       List[str],       # ground truth — evaluation only, never used as context
+    valid_mask:       List[bool],
     tokenizer,
     model,
-    device:        torch.device,
-    alpha:         float,
-    beam_width:    int = 5,
-    top_k:         int = 5,
-    normalization: str = "logsoftmax",
+    device:           torch.device,
+    alpha:            float,
+    beam_width:       int = 5,
+    top_k:            int = 5,
+    normalization:    str = "logsoftmax",
+    no_repeat_ngram:  int = 0,
 ) -> Dict:
     """
     MEG-guided beam-search fusion.
@@ -309,6 +320,13 @@ def beam_search_fusion(
       3. fused = (1-alpha)*meg_norm[candidate] + alpha*llm_norm[candidate]
       4. B × n_candidates → keep top-B beams by cumulative fused score.
 
+    no_repeat_ngram : int
+        If > 0, block any candidate that would create a repeated n-gram of this
+        length in the beam's history.  n=2 blocks immediate word repetition
+        (e.g. "flash flash"); n=3 blocks repeated trigrams.  Falls back to the
+        next-best candidate; if all candidates are blocked, the block is lifted
+        for that beam so the search never stalls.
+
     Returns
     -------
     dict:
@@ -320,16 +338,7 @@ def beam_search_fusion(
     V = len(vocab)
     k = min(top_k, V)
 
-    # First-subtoken ID for each trial-vocab word (for LLM logit extraction)
-    vocab_tok_ids: List[int] = []
-    for w in vocab:
-        ids = tokenizer.encode(" " + w, add_special_tokens=False)
-        if not ids:
-            ids = tokenizer.encode(w, add_special_tokens=False)
-        vocab_tok_ids.append(ids[0] if ids else (tokenizer.unk_token_id or 0))
-    vocab_tok_ids_t = torch.tensor(vocab_tok_ids, dtype=torch.long, device=device)
-
-    # Full subword IDs per vocab word (for appending to beam context)
+    # Full subword IDs per vocab word (scoring + beam context)
     word_to_tids: Dict[str, List[int]] = {}
     for w in vocab:
         ids = tokenizer.encode(" " + w, add_special_tokens=False)
@@ -341,7 +350,6 @@ def beam_search_fusion(
     beams: List[Dict] = [{"history": [], "token_ids": list(bos), "cum_score": 0.0}]
 
     for t in range(N):
-        pdb.set_trace()
         # ── MEG scores ────────────────────────────────────────────────────────
         meg_row = meg_scores[t].to(device).float()   # (|V|,)
         if valid_mask[t]:
@@ -353,52 +361,74 @@ def beam_search_fusion(
             meg_norm     = torch.zeros(V, device=device)
             topk_indices = torch.arange(V, device=device)    # (V,)
 
-        n_cands = topk_indices.shape[0]
+        cand_list = topk_indices.tolist()   # vocab indices of candidates
+        n_cands   = len(cand_list)
 
-        # ── LLM scores (batched over beams) ──────────────────────────────────
-        batch_ids = [b["token_ids"] for b in beams]
-        max_len   = max((len(ids) for ids in batch_ids), default=0)
+        # ── LLM scores: full-word log P(w | h_b) per beam ────────────────────
+        # Optimised two-phase scoring:
+        #   Phase 1 — run the beam history ONCE with use_cache=True to get both
+        #             the KV cache and the last-position logit distribution.
+        #             Single-token words are scored with a free index lookup.
+        #   Phase 2 — for multi-token words only, extend the KV cache one token
+        #             at a time.  The history is never recomputed per candidate.
+        llm_cand_norm = torch.zeros(len(beams), n_cands, device=device)
 
-        if max_len == 0:
-            # No context (no BOS, t=0): uniform LLM contribution
-            llm_vocab_norm = torch.zeros(len(beams), V, device=device)
-        else:
-            nb   = len(beams)
-            pad  = torch.zeros(nb, max_len, dtype=torch.long, device=device)
-            mask = torch.zeros(nb, max_len, dtype=torch.long, device=device)
-            for i, ids in enumerate(batch_ids):
-                if ids:
-                    pad[i, :len(ids)]  = torch.tensor(ids, dtype=torch.long, device=device)
-                    mask[i, :len(ids)] = 1
+        for bi, beam in enumerate(beams):
+            h = beam["token_ids"]
+            if not h:
+                continue   # no context yet → leave as zeros (uniform)
 
-            logits = model(pad, attention_mask=mask).logits   # (nb, max_len, llm_V)
+            # Phase 1: one forward pass over history
+            hist_ids = torch.tensor([h], dtype=torch.long, device=device)
+            hist_out = model(hist_ids, use_cache=True)
+            past_kv       = hist_out.past_key_values
+            last_logprobs = F.log_softmax(hist_out.logits[0, -1, :], dim=-1)
 
-            last_pos    = [max(0, len(ids) - 1) for ids in batch_ids]
-            last_logits = torch.stack(
-                [logits[i, last_pos[i]] for i in range(nb)]
-            )                                                  # (nb, llm_V)
+            # Batch first-token score for all candidates in one index operation
+            first_tids_t = torch.tensor(
+                [word_to_tids[vocab[wi]][0] for wi in cand_list],
+                dtype=torch.long, device=device,
+            )
+            raw_list: List[float] = last_logprobs[first_tids_t].tolist()
 
-            # Extract trial vocab only, then normalize over it
-            llm_vocab_scores = last_logits[:, vocab_tok_ids_t]   # (nb, |V|)
-            llm_vocab_norm   = torch.stack([
-                _normalize_row(llm_vocab_scores[bi], normalization)
-                for bi in range(nb)
-            ])                                                     # (nb, |V|)
+            # Phase 2: extra passes only for multi-token candidates
+            for j, wi in enumerate(cand_list):
+                tids = word_to_tids[vocab[wi]]
+                if len(tids) == 1:
+                    continue
+                curr_past_kv = past_kv
+                extra = 0.0
+                for k_tok in range(len(tids) - 1):
+                    inp = torch.tensor([[tids[k_tok]]], dtype=torch.long, device=device)
+                    out = model(inp, past_key_values=curr_past_kv, use_cache=True)
+                    curr_past_kv = out.past_key_values
+                    extra += F.log_softmax(out.logits[0, -1, :], dim=-1)[tids[k_tok + 1]].item()
+                raw_list[j] += extra
+
+            raw = torch.tensor(raw_list, device=device)
+            llm_cand_norm[bi] = _normalize_row(raw, normalization)
 
         # ── Expand beams ──────────────────────────────────────────────────────
         candidates: List[Dict] = []
         for bi, beam in enumerate(beams):
-            for j in range(n_cands):
-                wi    = topk_indices[j].item()
+            blocked: List[Dict] = []   # fallback if all candidates are blocked
+            for j, wi in enumerate(cand_list):
                 word  = vocab[wi]
                 fused = ((1.0 - alpha) * meg_norm[wi].item()
-                         + alpha * llm_vocab_norm[bi, wi].item())
-                candidates.append({
+                         + alpha * llm_cand_norm[bi, j].item())
+                entry = {
                     "history":   beam["history"] + [word],
                     "token_ids": beam["token_ids"] + word_to_tids[word],
                     "cum_score": beam["cum_score"] + fused,
-                })
-
+                }
+                if no_repeat_ngram > 0 and _would_repeat_ngram(beam["history"], word, no_repeat_ngram):
+                    blocked.append(entry)
+                else:
+                    candidates.append(entry)
+            # If every candidate for this beam was blocked, admit them anyway so
+            # the search never stalls (this can happen with very small top_k).
+            if not any(c["history"][:-1] == beam["history"] for c in candidates):
+                candidates.extend(blocked)
         candidates.sort(key=lambda c: c["cum_score"], reverse=True)
         beams = candidates[:beam_width]
 
@@ -412,17 +442,18 @@ def beam_search_fusion(
 
 
 def sweep_alphas_beam(
-    meg_scores:    torch.Tensor,
-    vocab:         List[str],
-    word_texts:    List[str],
-    valid_mask:    List[bool],
+    meg_scores:      torch.Tensor,
+    vocab:           List[str],
+    word_texts:      List[str],
+    valid_mask:      List[bool],
     tokenizer,
     model,
-    device:        torch.device,
-    alphas:        List[float],
-    beam_width:    int = 5,
-    top_k:         int = 5,
-    normalization: str = "logsoftmax",
+    device:          torch.device,
+    alphas:          List[float],
+    beam_width:      int = 5,
+    top_k:           int = 5,
+    normalization:   str = "logsoftmax",
+    no_repeat_ngram: int = 0,
 ) -> Dict[float, Dict]:
     """
     Run beam_search_fusion independently for each alpha value.
@@ -436,7 +467,7 @@ def sweep_alphas_beam(
             meg_scores, vocab, word_texts, valid_mask,
             tokenizer, model, device,
             alpha=alpha, beam_width=beam_width, top_k=top_k,
-            normalization=normalization,
+            normalization=normalization, no_repeat_ngram=no_repeat_ngram,
         )
         for alpha in alphas
     }

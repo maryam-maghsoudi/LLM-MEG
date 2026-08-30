@@ -28,6 +28,9 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# Module-level cache: keyed by (bert_name, layer) → {poem: Tensor}
+_bert_hiddens_cache: Dict = {}
+
 from unified.data.base_dataset import (
     _load_meg_trial, _load_onsets, _onset_to_window,
     N_CHANNELS, WIN_SIZE,
@@ -123,10 +126,13 @@ def _predict_inference(
     )
     bert_proj.eval()
 
-    # BERT hidden states for all words in the poem
+    # BERT hidden states for all words in the poem — cached across trials
     from unified.data.base_dataset import ONSET_DIR
     poem = cfg.get("_poem", word_texts)                    # fallback
-    bert_hiddens = load_bert_hiddens(ONSET_DIR, bert_name, str(device), bert_layer)
+    _cache_key = (bert_name, bert_layer)
+    if _cache_key not in _bert_hiddens_cache:
+        _bert_hiddens_cache[_cache_key] = load_bert_hiddens(ONSET_DIR, bert_name, str(device), bert_layer)
+    bert_hiddens = _bert_hiddens_cache[_cache_key]
 
     # Build vocab from this trial
     vocab    = _build_vocab(word_texts)

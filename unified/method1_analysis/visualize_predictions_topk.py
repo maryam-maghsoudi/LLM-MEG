@@ -12,10 +12,10 @@ Each row also shows the top-5 predicted words so you can see what the
 model actually considered.
 
 Usage (from llm_decoder/ parent):
-    python -m unified.inference_analysis.visualize_predictions_topk
-    python -m unified.inference_analysis.visualize_predictions_topk --topk 10
-    python -m unified.inference_analysis.visualize_predictions_topk --sessions 0 5
-    python -m unified.inference_analysis.visualize_predictions_topk --no_figs
+    python -m unified.method1_analysis.visualize_predictions_topk
+    python -m unified.method1_analysis.visualize_predictions_topk --topk 10
+    python -m unified.method1_analysis.visualize_predictions_topk --sessions 0 5
+    python -m unified.method1_analysis.visualize_predictions_topk --no_figs
 """
 
 import argparse

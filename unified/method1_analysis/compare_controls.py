@@ -10,8 +10,8 @@ For each eval scheme (loso, session_cv, stimulus):
   - Prints a summary table and saves results to CSV + figures
 
 Usage (from llm_decoder/ parent):
-    python -m unified.inference_analysis.compare_controls
-    python -m unified.inference_analysis.compare_controls --no_figs
+    python -m unified.method1_analysis.compare_controls
+    python -m unified.method1_analysis.compare_controls --no_figs
 """
 
 import argparse

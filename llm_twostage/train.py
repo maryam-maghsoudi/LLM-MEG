@@ -555,7 +555,7 @@ def main():
         t0 = time.time()
         ds_s1_train = MEGWordDatasetLLM(
             **splits["train"], llm_name=args.llm_name,
-            hmid_layer=hmid_layer, augment=True,
+            hmid_layer=hmid_layer, augment=False,
         )
         ds_s1_val = MEGWordDatasetLLM(
             **splits["val"],   llm_name=args.llm_name,
