@@ -66,10 +66,12 @@ class BERTAugmentedDataset(Dataset):
     def __len__(self) -> int:
         return len(self._base)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        item = self._base[idx]
-        h    = self._hiddens[item["poem"]][item["word_pos"]]   # (768,)
-        return item["meg_window"], h
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        item      = self._base[idx]
+        h         = self._hiddens[item["poem"]][item["word_pos"]]   # (768,)
+        poem_idx  = 0 if item["poem"] == "poem1" else 1
+        target_id = torch.tensor(poem_idx * 100 + item["word_pos"], dtype=torch.long)
+        return item["meg_window"], h, target_id
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +79,39 @@ class BERTAugmentedDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 def info_nce(z_meg: torch.Tensor, z_text: torch.Tensor,
-             temperature: float = TEMP) -> torch.Tensor:
-    """Single-direction InfoNCE (MEG as query). (N, d) × (N, d) → scalar."""
-    N   = z_meg.shape[0]
-    sim = z_meg @ z_text.T / temperature         # (N, N)
-    return F.cross_entropy(sim, torch.arange(N, device=z_meg.device))
+             target_ids: torch.Tensor,
+             temperature: float = TEMP,
+             verbose: bool = False) -> torch.Tensor:
+    """
+    Multi-positive InfoNCE (MEG as query). (N, d) × (N, d) → scalar.
+
+    For each query i, all j with target_ids[j] == target_ids[i] are positives.
+    Loss uses logsumexp for numerical stability:
+        L_i = -(logsumexp(sim[i, pos]) - logsumexp(sim[i, :]))
+    """
+    sim = z_meg @ z_text.T / temperature                       # (N, N)
+
+    # positive_mask[i, j] = True iff target_ids[i] == target_ids[j]
+    positive_mask = target_ids.unsqueeze(1) == target_ids.unsqueeze(0)  # (N, N)
+
+    log_denom = torch.logsumexp(sim, dim=1)                    # (N,)
+
+    # logsumexp over positives only: mask out non-positives with -inf
+    neg_inf    = torch.full_like(sim, float("-inf"))
+    sim_pos    = torch.where(positive_mask, sim, neg_inf)
+    log_num    = torch.logsumexp(sim_pos, dim=1)               # (N,)
+
+    loss = -(log_num - log_denom).mean()
+
+    if verbose:
+        N           = z_meg.shape[0]
+        n_pos_extra = (positive_mask.sum(dim=1) > 1).sum().item()
+        max_pos     = positive_mask.sum(dim=1).max().item()
+        n_unique    = target_ids.unique().shape[0]
+        print(f"  [info_nce] N={N}  unique_targets={n_unique}  "
+              f"samples_with_extra_pos={n_pos_extra}  max_pos={int(max_pos)}")
+
+    return loss
 
 
 # ---------------------------------------------------------------------------
@@ -183,19 +213,18 @@ def train(
     print(f"  lr={lr}  bs={batch_size}  epochs={epochs}  patience={patience}")
     print(f"{'='*60}")
 
-    import pdb
     for epoch in range(1, epochs + 1):
-        pdb.set_trace()
         # ── train ────────────────────────────────────────────────────────────
         meg_enc.train()
         bert_proj.train()
         t_losses = []
-        for x, y in dl_train:
-            x = x.to(device)
-            y = y.to(device)
-            z = meg_enc(x)
-            t = bert_proj(y)
-            loss = info_nce(z, t, temperature)
+        for x, y, tid in dl_train:
+            x   = x.to(device)
+            y   = y.to(device)
+            tid = tid.to(device)
+            z   = meg_enc(x)
+            t   = bert_proj(y)
+            loss = info_nce(z, t, tid, temperature)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -207,12 +236,13 @@ def train(
         bert_proj.eval()
         v_losses = []
         with torch.no_grad():
-            for x, y in dl_val:
-                x = x.to(device)
-                y = y.to(device)
-                z = meg_enc(x)
-                t = bert_proj(y)
-                v_losses.append(info_nce(z, t, temperature).item())
+            for x, y, tid in dl_val:
+                x   = x.to(device)
+                y   = y.to(device)
+                tid = tid.to(device)
+                z   = meg_enc(x)
+                t   = bert_proj(y)
+                v_losses.append(info_nce(z, t, tid, temperature).item())
 
         t_loss = float(np.mean(t_losses))
         v_loss = float(np.mean(v_losses))
