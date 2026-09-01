@@ -534,9 +534,9 @@ def plot_heatmap(
 
         im = ax.imshow(sim, vmin=-1, vmax=1, cmap="RdBu_r", aspect="auto")
         plt.colorbar(im, ax=ax, label="cosine sim")
-        tick_labels = words if N <= 40 else []
-        ax.set_xticks(range(N)); ax.set_xticklabels(tick_labels, rotation=90, fontsize=6)
-        ax.set_yticks(range(N)); ax.set_yticklabels(tick_labels, fontsize=6)
+        fontsize = max(3, min(7, int(180 / N)))
+        ax.set_xticks(range(N)); ax.set_xticklabels(words, rotation=90, fontsize=fontsize)
+        ax.set_yticks(range(N)); ax.set_yticklabels(words, fontsize=fontsize)
         ax.set_title(f"{lbl}\ntrial: {key[0]} sess={key[1]}  (N={N} words)", fontsize=11)
 
     fig.suptitle("Intra-trial MEG pairwise cosine similarity\n"
