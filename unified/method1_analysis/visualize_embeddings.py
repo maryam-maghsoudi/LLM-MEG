@@ -534,7 +534,7 @@ def plot_heatmap(
 
         im = ax.imshow(sim, vmin=-1, vmax=1, cmap="RdBu_r", aspect="auto")
         plt.colorbar(im, ax=ax, label="cosine sim")
-        fontsize = max(3, min(7, int(180 / N)))
+        fontsize = max(5, min(10, int(260 / N)))
         ax.set_xticks(range(N)); ax.set_xticklabels(words, rotation=90, fontsize=fontsize)
         ax.set_yticks(range(N)); ax.set_yticklabels(words, fontsize=fontsize)
         ax.set_title(f"{lbl}\ntrial: {key[0]} sess={key[1]}  (N={N} words)", fontsize=11)
