@@ -86,10 +86,12 @@ def parse_args():
                         "and meg_trial_all.pt; skips raw .fif loading")
 
     # Training hyper-params (shared)
-    p.add_argument("--lr",      type=float, default=None)
-    p.add_argument("--epochs",  type=int,   default=None)
-    p.add_argument("--bs",      type=int,   default=None)
-    p.add_argument("--patience",type=int,   default=None)
+    p.add_argument("--lr",          type=float, default=None)
+    p.add_argument("--epochs",      type=int,   default=None)
+    p.add_argument("--bs",          type=int,   default=None)
+    p.add_argument("--patience",    type=int,   default=None)
+    p.add_argument("--temperature", type=float, default=None,
+                   help="InfoNCE temperature for Method 1 (default: 0.07)")
 
     return p.parse_args()
 
@@ -193,10 +195,11 @@ def main():
             control   = args.control,
             cache_dir = args.cache_dir,
         )
-        if args.lr:       kwargs["lr"]       = args.lr
-        if args.epochs:   kwargs["epochs"]   = args.epochs
-        if args.bs:       kwargs["batch_size"]= args.bs
-        if args.patience: kwargs["patience"] = args.patience
+        if args.lr:          kwargs["lr"]          = args.lr
+        if args.epochs:      kwargs["epochs"]      = args.epochs
+        if args.bs:          kwargs["batch_size"]  = args.bs
+        if args.patience:    kwargs["patience"]    = args.patience
+        if args.temperature: kwargs["temperature"] = args.temperature
         train(**kwargs)
 
     # ── Method 2 ─────────────────────────────────────────────────────────────

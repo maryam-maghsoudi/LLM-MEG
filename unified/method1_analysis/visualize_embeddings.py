@@ -123,6 +123,7 @@ def extract_embeddings(
     poem_vocab:   Dict[str, Dict[int, str]],
     device:       torch.device,
     batch_size:   int = 256,
+    meg_base:     Optional[Path] = None,
 ) -> Dict:
     """
     Run MEG windows and matched BERT hiddens through trained models.
@@ -142,7 +143,7 @@ def extract_embeddings(
     trial_groups : Dict[tuple, List[int]]  index lists into the above arrays
     """
     trials = [(subject, poem, sess) for poem in poems for sess in sessions]
-    ds = MEGWordDataset(trials, augment=False)
+    ds = MEGWordDataset(trials, augment=False, meg_base=meg_base)
     if len(ds) == 0:
         raise RuntimeError(
             f"No valid MEG windows for subject={subject}, "
@@ -291,8 +292,9 @@ def compute_nn_purity(data: Dict, k: int = 5) -> Dict:
     }
 
 
-def compute_diagnostics(data: Dict, label: str, k: int = 5) -> Dict:
-    print(f"\n── Diagnostics: {label} ──")
+def compute_diagnostics(data: Dict, label: str, k: int = 5, verbose: bool = True) -> Dict:
+    if verbose:
+        print(f"\n── Diagnostics: {label} ──")
     erank_meg  = effective_rank(data["z_meg"])
     erank_text = effective_rank(data["z_text"])
     cos_meg    = pairwise_cos_stats(data["z_meg"])
@@ -300,16 +302,17 @@ def compute_diagnostics(data: Dict, label: str, k: int = 5) -> Dict:
     trial_st   = per_trial_cos_stats(data)
     nn         = compute_nn_purity(data, k=k)
 
-    print(f"  MEG  effective_rank  = {erank_meg:.2f}  (max={data['z_meg'].shape[1]})")
-    print(f"  text effective_rank  = {erank_text:.2f}")
-    print(f"  MEG  pairwise cos    = {cos_meg[0]:.4f} ± {cos_meg[1]:.4f}")
-    print(f"  text pairwise cos    = {cos_text[0]:.4f} ± {cos_text[1]:.4f}")
-    print(f"  intra-trial MEG cos  = {trial_st['mean']:.4f} ± {trial_st['std']:.4f}"
-          f"  ({trial_st['n_trials']} trials)")
-    print(f"  NN exact match       = {nn['exact_match']:.3f}")
-    print(f"  NN top-{k} purity    = {nn['purity_top_k']:.3f}"
-          f"  (words: {nn['top_k_words']})")
-    print(f"  NN distribution (top 10): {nn['nn_word_distribution']}")
+    if verbose:
+        print(f"  MEG  effective_rank  = {erank_meg:.2f}  (max={data['z_meg'].shape[1]})")
+        print(f"  text effective_rank  = {erank_text:.2f}")
+        print(f"  MEG  pairwise cos    = {cos_meg[0]:.4f} ± {cos_meg[1]:.4f}")
+        print(f"  text pairwise cos    = {cos_text[0]:.4f} ± {cos_text[1]:.4f}")
+        print(f"  intra-trial MEG cos  = {trial_st['mean']:.4f} ± {trial_st['std']:.4f}"
+              f"  ({trial_st['n_trials']} trials)")
+        print(f"  NN exact match       = {nn['exact_match']:.3f}")
+        print(f"  NN top-{k} purity    = {nn['purity_top_k']:.3f}"
+              f"  (words: {nn['top_k_words']})")
+        print(f"  NN distribution (top 10): {nn['nn_word_distribution']}")
 
     return {
         "label":                     label,

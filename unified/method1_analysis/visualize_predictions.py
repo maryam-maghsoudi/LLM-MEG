@@ -177,6 +177,12 @@ def parse_args():
     p.add_argument("--no_figs", action="store_true")
     p.add_argument("--subjects", nargs="+", default=None,
                    help="Subset of subjects (default: all 13)")
+    p.add_argument("--ckpt_root", default=None,
+                   help="Root checkpoint directory containing loso_sub-* subdirs "
+                        "(default: unified/out/inference/bert_base_uncased)")
+    p.add_argument("--out_dir", default=None,
+                   help="Output directory for figures and text log "
+                        "(default: method1_analysis/results/predictions)")
     return p.parse_args()
 
 
@@ -212,17 +218,19 @@ def _run_predict(subject, poem, session, ckpt_dir, device):
 
 
 def main():
-    args     = parse_args()
-    subjects = args.subjects or SUBJECTS
-    sessions = args.sessions
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    args      = parse_args()
+    subjects  = args.subjects or SUBJECTS
+    sessions  = args.sessions
+    ckpt_root = Path(args.ckpt_root) if args.ckpt_root else CKPT_ROOT
+    out_dir   = Path(args.out_dir)   if args.out_dir   else OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # Open a combined text log
-    log_path = OUT_DIR / "predictions_text.txt"
+    log_path = out_dir / "predictions_text.txt"
     log_lines = []
 
     for subject in subjects:
-        ckpt_dir = CKPT_ROOT / f"loso_{subject}"
+        ckpt_dir = ckpt_root / f"loso_{subject}"
         if not ckpt_dir.exists():
             print(f"[skip] no checkpoint for {subject}")
             continue
@@ -267,12 +275,12 @@ def main():
                 log_lines.append(block_str)
 
         if not args.no_figs and trials_data:
-            fig_path = OUT_DIR / f"{subject}_predictions.png"
+            fig_path = out_dir / f"{subject}_predictions.png"
             make_figure(subject, trials_data, fig_path)
 
     log_path.write_text("\n".join(log_lines))
     print(f"\nText log → {log_path}")
-    print(f"Figures  → {OUT_DIR}")
+    print(f"Figures  → {out_dir}")
 
 
 if __name__ == "__main__":
