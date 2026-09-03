@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.xlsx
+*.csv
+*.pt
+checkpoints/
+eval_results/
+slurm_logs/

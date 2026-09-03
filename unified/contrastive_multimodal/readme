@@ -1,0 +1,92 @@
+# MEG-to-Text — Run Guide
+
+Closed-vocabulary MEG-to-text decoding (listening condition). This doc walks through running the pipeline from scratch and getting the same kind of results as the sub-01 baseline run.
+
+## 1. Environment
+
+Confirmed working versions:
+
+```
+torch==2.10.0+cu128
+transformers==5.16.1
+```
+
+Also needed: `openpyxl` (for `eval_stage1.py`'s Excel export). A GPU is not required to run the pipeline mechanically, but `train_stage2.py` and `eval_stage2.py` need real network/HF-cache access to frozen GPT-2 weights — they are not synthetic dry runs.
+
+## 2. Data you need before starting
+
+- Raw MEG recordings for however many subjects/sessions you're running (13 subjects × 10 sessions in the full dataset).
+- Onset JSON files with word-level `start`/`end` timestamps.
+  - **Before running anything else**, open one onset JSON and confirm each entry actually has an `end` key. `new_dataset.py`'s entire pipeline assumes this and will fail unpredictably if it's missing — this has historically never been checked, so don't skip it.
+- The two poem texts/audio (poem1, poem2) used to build the teacher cache.
+
+## 3. Run order
+
+The stages have hard dependencies — run them in this order:
+
+```
+teacher_cache.py            (once, offline, produces cached GPT-2 / wav2vec2 targets)
+        |
+        v
+train.py                    (Stage 1: contrastive alignment)
+        |
+        v
+eval_stage1.py               (Stage 1 retrieval eval — can run as soon as a checkpoint exists)
+        |
+        v
+train_stage2.py              (Stage 2: KL next-word distillation, loads frozen Stage 1 checkpoint)
+        |
+        v
+eval_stage2.py               (Stage 2 next-word eval)
+```
+
+### Step 1 — Build the teacher cache
+
+```bash
+python teacher_cache.py
+```
+
+Runs wav2vec2 and frozen GPT-2 once over both poems. Produces a cache dict per poem containing `audio_target`, `h_mid`, `hf`, `hf_full`, per-sweep-layer hidden states, `input_ids`, `word_to_last_subtok`, and a `sanity_check` entry.
+
+**Sanity check to look for in the output:** `max_abs_error=0.00e+00`, `argmax_agreement=1.0000`, for both poems and all sweep layers `[0, 4, 8, 12]`. If you don't see this, stop here — nothing downstream is trustworthy until the cache is right. A known failure mode to watch for: poem1 and poem2 ending up with byte-identical `audio_target` (a duplicate-file bug in upstream data loading) — check the two `audio_target` tensors aren't equal before trusting the cache.
+
+### Step 2 — Train Stage 1 (contrastive alignment)
+
+```bash
+python train.py \
+  --anneal_mode joint_annealed \
+  --pooling_mode exact \
+  --held_out_subject sub-01
+```
+
+Key options:
+- `--anneal_mode`: one of `joint_annealed` (primary/default), `llm_only`, `joint_fixed`, `hard_staged`.
+- `--pooling_mode`: `exact` (zero-parameter average pooling, Setting A) or `wide` (learned attention pooling, Setting B).
+- `--batch_size` defaults to 4; `--patience` (early stopping) defaults to 10.
+
+**Output:** a checkpoint file named like `stage1_best_{subject}_{anneal_mode}_{pooling_mode}.pt`, e.g. `stage1_best_sub-01_joint_annealed_exact.pt`. Note the final `val_loss` printed at the end — this is your baseline for comparing runs.
+
+### Step 3 — Evaluate Stage 1 (retrieval)
+
+```bash
+python eval_stage1.py \
+  --checkpoint stage1_best_sub-01_joint_annealed_exact.pt \
+  --shuffle_control --num_shuffle_seeds 20 \
+  --zero_control
+```
+
+This:
+- Builds the candidate bank (both poems' `h_mid` vectors, 117 word occurrences total).
+- Runs the frozen Stage 1 pipeline over the LOSO test split for the held-out subject.
+- Reports `top1`/`top5` accuracy against `chance_level = k/n`.
+- With `--shuffle_control`, also computes a null distribution over `num_shuffle_seeds` seeds and a `permutation_percentile`. **Use ≥100 seeds if you plan to report a p-value in a table** — 20 seeds can only express p-values down to ~0.05.
+- With `--zero_control`, reports accuracy when the MEG input is replaced with zeros (should land at ~naive chance; if it doesn't, something in the encoder has a bias toward a default output).
+- Writes a color-coded `.xlsx` (green = correct top-1, light green = correct top-5, red = miss; one sheet per poem) plus a plain `.csv`, both in your output directory.
+
+
+
+
+
+
+
+
