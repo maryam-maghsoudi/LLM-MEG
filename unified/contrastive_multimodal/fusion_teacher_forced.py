@@ -261,7 +261,7 @@ def plot_alpha_sweep(
     Plot a fusion metric vs. alpha from one or more per-subject result JSONs.
 
     json_paths : str or List[str] — path(s) to *_fusion_*.json files
-    metric     : one of "R@1", "R@5", "MRR", "word_acc"
+    metric     : one of "R@1", "R@5", "MRR", "word_acc", "bleu1"
     out_path   : if given, save figure to this path (PNG/PDF); else show interactively
     title      : optional figure title override
 
@@ -496,8 +496,9 @@ def main(args):
     print(f"Saved → {out_path}")
 
     if args.plot:
-        plot_path = out_path.replace(".json", "_R@1.png")
-        plot_alpha_sweep(out_path, metric="R@1", out_path=plot_path)
+        for metric in ("R@1", "bleu1"):
+            plot_path = out_path.replace(".json", f"_{metric}.png")
+            plot_alpha_sweep(out_path, metric=metric, out_path=plot_path)
 
 
 if __name__ == "__main__":
