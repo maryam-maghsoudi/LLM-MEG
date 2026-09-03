@@ -28,6 +28,7 @@ Usage (run from inside contrastive_multimodal/):
 """
 
 import argparse
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 import json
 import os
 
@@ -192,17 +193,17 @@ def fuse_scores(meg_scores, llm_scores, alpha, normalization):
 
 def eval_metrics(fused_scores, vocab, word_texts, valid_mask, ks=(1, 5)):
     """
-    R@k, MRR, and word accuracy at valid positions where ground-truth is in vocab.
-    Accumulates weighted sums; caller divides by n_valid for averages.
+    R@k, MRR, word accuracy, and BLEU-1 at valid positions where ground-truth is in vocab.
 
-    Returns dict with n_valid, R@1, R@5, MRR, word_acc (all raw counts/sums —
-    divide by n_valid to get rates).
+    R@k, MRR, word_acc are raw sums — caller divides by n_valid for rates.
+    bleu1 is a per-trial sentence BLEU-1 rate (0–1) — caller divides by n_trials.
     """
     word_to_vi = {w: i for i, w in enumerate(vocab)}
     rk_sum = {k: 0 for k in ks}
     mrr_sum = 0.0
     acc_sum = 0
     n_valid = 0
+    hyp, ref = [], []
 
     for i, (word, valid) in enumerate(zip(word_texts, valid_mask)):
         if not valid or word not in word_to_vi:
@@ -215,12 +216,21 @@ def eval_metrics(fused_scores, vocab, word_texts, valid_mask, ks=(1, 5)):
             rk_sum[k] += int(rank <= k)
         mrr_sum += 1.0 / rank
         acc_sum += int(rank == 1)
+        hyp.append(vocab[int(scores_i.argmax().item())])
+        ref.append(word)
+
+    if hyp:
+        bleu1 = sentence_bleu([ref], hyp, weights=(1.0,),
+                              smoothing_function=SmoothingFunction().method1)
+    else:
+        bleu1 = 0.0
 
     return {
         "n_valid": n_valid,
         **{f"R@{k}": rk_sum[k] for k in ks},
         "MRR": mrr_sum,
         "word_acc": acc_sum,
+        "bleu1": bleu1,
     }
 
 
@@ -409,7 +419,7 @@ def main(args):
 
     # --- Alpha sweep accumulator ---
     # Accumulate weighted sums; divide by total n_valid at the end
-    acc = {a: {"R@1": 0, "R@5": 0, "MRR": 0.0, "word_acc": 0, "n_valid": 0}
+    acc = {a: {"R@1": 0, "R@5": 0, "MRR": 0.0, "word_acc": 0, "n_valid": 0, "bleu1_sum": 0.0}
            for a in ALPHA_GRID}
     diag_list = []
     n_trials = 0
@@ -436,6 +446,7 @@ def main(args):
             for key in ("R@1", "R@5", "MRR", "word_acc"):
                 acc[alpha][key] += m[key]
             acc[alpha]["n_valid"] += m["n_valid"]
+            acc[alpha]["bleu1_sum"] += m["bleu1"]
 
         n_trials += 1
         if n_trials % 5 == 0:
@@ -450,16 +461,17 @@ def main(args):
             for k in ("R@1", "R@5", "MRR", "word_acc")
         }
         results[alpha]["n_valid"] = n
+        results[alpha]["bleu1"] = acc[alpha]["bleu1_sum"] / n_trials if n_trials > 0 else 0.0
 
     avg_diag = {k: sum(d[k] for d in diag_list) / len(diag_list) for k in diag_list[0]}
 
     # --- Print summary ---
     print(f"\n=== Fusion — {args.heldout_subject}  llm={args.llm_name}  norm={args.normalization} ===")
-    print(f"{'alpha':>6}  {'R@1':>7}  {'R@5':>7}  {'MRR':>7}  {'word_acc':>9}")
+    print(f"{'alpha':>6}  {'R@1':>7}  {'R@5':>7}  {'MRR':>7}  {'word_acc':>9}  {'BLEU-1':>8}")
     for alpha in [0.0, 0.25, 0.5, 0.75, 1.0]:
         r = results[alpha]
         print(f"{alpha:6.2f}  {r['R@1']*100:6.2f}%  {r['R@5']*100:6.2f}%  "
-              f"{r['MRR']*100:6.2f}%  {r['word_acc']*100:8.2f}%")
+              f"{r['MRR']*100:6.2f}%  {r['word_acc']*100:8.2f}%  {r['bleu1']*100:7.2f}%")
     print(f"\nScale: LLM/MEG std ratio = {avg_diag['mean_scale_ratio']:.1f}x "
           f"(median {avg_diag['median_scale_ratio']:.1f}x)  "
           f"[use --normalization row_zscore if LLM dominates at small alpha]")
