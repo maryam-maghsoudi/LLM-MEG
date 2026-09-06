@@ -40,7 +40,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # run from inside contrastive_multimodal/
 sys.path.insert(0, os.path.dirname(__file__))
-from new_dataset import MEGContinuousTrialDataset, collate_continuous_trials, MEG_BASE
+from new_dataset import MEGContinuousTrialDataset, collate_continuous_trials, MEG_BASE, _load_onsets
 from new_models import MEGEncoder, WordProjectionHead
 from pooling import WordAttentionPooling, pool_words
 from splits import make_loso_splits
@@ -88,7 +88,8 @@ def build_candidate_bank(teacher_cache):
         if not isinstance(cache, dict) or "h_mid" not in cache:
             continue
         h_mid = cache["h_mid"]           # (N_words, d)
-        words = cache["word_texts"]
+        onsets = _load_onsets(poem_key)
+        words = [e["word"].strip().lower() for e in onsets]
         for i, w in enumerate(words):
             wl = w.strip().lower()
             all_vecs.append(h_mid[i])
@@ -144,8 +145,9 @@ def meg_scores_to_type_level(z_word, bank_vectors, bank_word_types, vocab):
     z_word       : (N, 128)  L2-normalized (from WordProjectionHead)
     bank_vectors : (M, d)    NOT unit-norm; normalized here
     """
+    z_norm    = F.normalize(z_word.float(), dim=-1)
     bank_norm = F.normalize(bank_vectors.float(), dim=-1).to(z_word.device)
-    sim = (z_word.float() @ bank_norm.T).cpu()   # (N, M)
+    sim = (z_norm @ bank_norm.T).cpu()   # (N, M)
 
     N, V = z_word.shape[0], len(vocab)
     word_to_vi = {w: i for i, w in enumerate(vocab)}
@@ -223,7 +225,10 @@ def beam_search_fusion(
     MEG-guided beam-search fusion for one trial at one alpha value.
 
     At each position t:
-      - Valid: top-k MEG candidates, normalized meg scores over |V|.
+      # Valid:
+        #   1. Select top-k candidates from raw MEG scores.
+        #   2. Normalize MEG scores over those k candidates.
+        #   3. Score and normalize LLM over the same k candidates.
       - Invalid: full vocab candidates, zero MEG contribution.
     LLM is run once per beam with KV-cache; multi-token words extend the cache.
 
@@ -249,12 +254,13 @@ def beam_search_fusion(
         # ── MEG candidates ────────────────────────────────────────────────────
         meg_row = meg_scores[t].to(device).float()   # (|V|,)
         if valid_mask[t]:
-            meg_norm     = _normalize_row(meg_row, normalization)   # (|V|,)
-            topk_indices = meg_norm.topk(k).indices                 # (k,)
+            topk_indices  = meg_row.topk(k).indices                      # (k,)
+            meg_cand_raw  = meg_row[topk_indices]                        # (k,)
+            meg_cand_norm = _normalize_row(meg_cand_raw, normalization)  # (k,)
         else:
             # No MEG signal: let LLM drive the candidate set
-            meg_norm     = torch.zeros(V, device=device)
-            topk_indices = torch.arange(V, device=device)
+            topk_indices  = torch.arange(V, device=device)
+            meg_cand_norm = torch.zeros(V, device=device)
 
         cand_list = topk_indices.tolist()
         n_cands   = len(cand_list)
@@ -306,7 +312,7 @@ def beam_search_fusion(
             blocked: List[Dict] = []
             for j, wi in enumerate(cand_list):
                 word  = vocab[wi]
-                fused = ((1.0 - alpha) * meg_norm[wi].item()
+                fused = ((1.0 - alpha) * meg_cand_norm[j].item()
                          + alpha      * llm_cand_norm[bi, j].item())
                 entry = {
                     "history":   beam["history"]   + [word],
@@ -513,18 +519,6 @@ def plot_alpha_sweep_beam_multi(json_paths: List[str], metric: str = "bleu1",
 #  Main
 # ===========================================================================
 
-def _load_onsets(poem: str) -> List[Dict]:
-    import json as _json
-    onset_dir = Path("/fs/nexus-projects/brain_project/maryam_meg_dataset/imgtolis"
-                     "/contrastive_learning/onset_out")
-    for cond in ("lis", "img"):
-        p = onset_dir / f"{poem}{cond}_onsets.json"
-        if p.exists():
-            with open(p) as f:
-                return _json.load(f)
-    raise FileNotFoundError(f"No onset JSON found for poem={poem!r} in {onset_dir}")
-
-
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device={device}  subject={args.heldout_subject}  "
@@ -567,11 +561,15 @@ def main(args):
     # Accumulate metrics: {alpha: {metric: sum, n_trials: int}}
     acc = {a: {"bleu1": 0.0, "word_acc": 0.0, "n_valid": 0, "n_trials": 0}
            for a in ALPHA_GRID}
+    # Per-trial predictions for post-hoc visualization (keyed by str(alpha))
+    trials_out: Dict[str, List] = {str(a): [] for a in ALPHA_GRID}
     n_trials = 0
 
     print(f"Running beam-search fusion over {len(test_ds)} trials "
           f"× {len(ALPHA_GRID)} alphas ...")
     for batch in test_loader:
+        session = int(batch["session"][0]) if "session" in batch else None
+
         z_word, valid_mask, word_texts, poem = run_encoder_on_trial(
             batch, encoder, word_head, pooling_module, pooling_mode, device
         )
@@ -600,6 +598,13 @@ def main(args):
             acc[alpha]["word_acc"] += m["word_acc"]
             acc[alpha]["n_valid"]  += m["n_valid"]
             acc[alpha]["n_trials"] += 1
+            trials_out[str(alpha)].append({
+                "pred_sequence": res["pred_sequence"],
+                "word_texts":    word_texts,
+                "valid_mask":    valid_list,
+                "poem":          poem,
+                "session":       session,
+            })
 
         n_trials += 1
         if n_trials % 2 == 0 or n_trials == len(test_ds):
@@ -642,6 +647,7 @@ def main(args):
         "no_repeat_ngram": args.no_repeat_ngram,
         "n_trials":        n_trials,
         "results":         results,
+        "trials":          trials_out,
     }
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2)

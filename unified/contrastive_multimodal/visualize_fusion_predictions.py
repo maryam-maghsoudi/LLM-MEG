@@ -160,7 +160,7 @@ def draw_panel(ax, words, valid, preds_by_alpha, col_alphas, best_alpha,
             color="#aaaaaa", linewidth=0.6)
 
 
-def make_figure(subject, panels, col_alphas, best_alpha, normalization, out_path):
+def make_figure(subject, panels, col_alphas, best_alpha, normalization, out_path, title=None):
     """
     panels : list of dicts — one per trial (poem+session):
         words, valid, preds_by_alpha, bleu1_by_alpha, poem, session
@@ -187,7 +187,7 @@ def make_figure(subject, panels, col_alphas, best_alpha, normalization, out_path
     if n_panels == 1:
         axes = [axes]
 
-    fig.suptitle(f"Teacher-forced fusion — {subject}", fontsize=12,
+    fig.suptitle(title or f"Teacher-forced fusion — {subject}", fontsize=12,
                  fontweight="bold", y=0.995)
 
     for ax, panel in zip(axes, panels):
