@@ -1,0 +1,6 @@
+# Large regenerable artifacts — not tracked
+predicted_npy/
+
+# Per-subject prediction traces (regenerable with --save_traces)
+results/**/trace_*.csv
+results/**/trace_*.xlsx

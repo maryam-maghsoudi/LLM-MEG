@@ -1,0 +1,116 @@
+{
+  "mapping_key": "RNN_full",
+  "stage1_tag": "joint_annealed_exact",
+  "predicted_root": "/fs/nexus-projects/brain_project/maryam_meg_dataset/imgtolis/llm_decoder/unified/contrastive_multimodal/imagined_eval/predicted_npy/RNN_full",
+  "n_subjects": 13,
+  "mean_top1": 0.044575937951986604,
+  "mean_top5": 0.16508876245755416,
+  "chance_top1": 0.008547008547008548,
+  "chance_top5": 0.042735042735042736,
+  "per_subject": [
+    {
+      "subject": "sub-01",
+      "top1": 0.04529914632439613,
+      "top5": 0.15128205716609955,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-03",
+      "top1": 0.04871794953942299,
+      "top5": 0.15726496279239655,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-04",
+      "top1": 0.04871794953942299,
+      "top5": 0.16837607324123383,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-05",
+      "top1": 0.05299145355820656,
+      "top5": 0.1786324828863144,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-06",
+      "top1": 0.04188034310936928,
+      "top5": 0.17521367967128754,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-09",
+      "top1": 0.04615384712815285,
+      "top5": 0.15811966359615326,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-10",
+      "top1": 0.03846153989434242,
+      "top5": 0.15641026198863983,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-11",
+      "top1": 0.03589743748307228,
+      "top5": 0.16239316761493683,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-12",
+      "top1": 0.032478634268045425,
+      "top5": 0.14957265555858612,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-13",
+      "top1": 0.04444444552063942,
+      "top5": 0.16410256922245026,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-14",
+      "top1": 0.03418803587555885,
+      "top5": 0.15897436439990997,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-16",
+      "top1": 0.05042735114693642,
+      "top5": 0.1846153885126114,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    },
+    {
+      "subject": "sub-17",
+      "top1": 0.05982905998826027,
+      "top5": 0.18119658529758453,
+      "n_queries": 1170,
+      "n_candidates": 117,
+      "pooling_mode": "exact"
+    }
+  ]
+}
