@@ -128,7 +128,10 @@ def eval_one_subject(subj, predicted_root, stage1_ckpt, bank, device, save_dir):
 
 
 def main(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
 
     predicted_root = args.predicted_root or str(
         Path(__file__).parent / "predicted_npy" / args.mapping_key
@@ -207,6 +210,8 @@ def build_arg_parser():
                    default=str(Path(__file__).parent / "results"))
     p.add_argument("--save_traces", action="store_true",
                    help="Also write per-subject CSV + color-coded Excel prediction traces.")
+    p.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"],
+                   help="Compute device (default: auto = cuda if available, else cpu).")
     return p
 
 
