@@ -2,22 +2,35 @@
 # Submit Stage 1 eval for all 13 LOSO subjects (new_contrastive pipeline).
 #
 # Usage:
-#   bash submit_eval_loso.sh [anneal_mode] [pooling_mode]
+#   bash submit_eval_loso.sh [anneal_mode] [pooling_mode] [shuffled]
+#
+# Pass 'shuffled' as the 3rd arg to evaluate the shuffle-trained decoders:
+# the checkpoint gets the '_shuffled' filename suffix, and traces/logs go to a
+# '_shuffled' tag dir so they never overwrite the real-decoder eval. Then plot
+# with:  python plot_word_accuracy.py --tag ${ANNEAL_MODE}_${POOLING_MODE}_shuffled
 
 set -e
 
 ANNEAL_MODE=${1:-joint_annealed}
 POOLING_MODE=${2:-exact}
+SHUFFLE=${3:-}
+
+CKPTSUF=""
+TAGSUF=""
+if [ "$SHUFFLE" = "shuffled" ]; then
+  CKPTSUF="_shuffled"
+  TAGSUF="_shuffled"
+fi
 
 SUBJECTS=(
   sub-01 sub-03 sub-04 sub-05 sub-06 sub-09
   sub-10 sub-11 sub-12 sub-13 sub-14 sub-16 sub-17
 )
 
-WORKDIR=/fs/nexus-projects/brain_project/maryam_meg_dataset/imgtolis/llm_decoder/unified/new_contrastive
+WORKDIR=/fs/nexus-projects/brain_project/maryam_meg_dataset/imgtolis/llm_decoder/unified/contrastive_multimodal
 CKPTDIR=$WORKDIR/checkpoints/${ANNEAL_MODE}_${POOLING_MODE}
-OUTDIR=$WORKDIR/eval_results/${ANNEAL_MODE}_${POOLING_MODE}
-LOGDIR=$WORKDIR/slurm_logs/eval_${ANNEAL_MODE}_${POOLING_MODE}
+OUTDIR=$WORKDIR/eval_results/${ANNEAL_MODE}_${POOLING_MODE}${TAGSUF}
+LOGDIR=$WORKDIR/slurm_logs/eval_${ANNEAL_MODE}_${POOLING_MODE}${TAGSUF}
 
 mkdir -p "$OUTDIR" "$LOGDIR"
 
@@ -31,15 +44,15 @@ SBATCH_BASE=(
   "--error=$LOGDIR/%j_%x.err"
 )
 
-echo "anneal_mode=$ANNEAL_MODE  pooling_mode=$POOLING_MODE"
+echo "anneal_mode=$ANNEAL_MODE  pooling_mode=$POOLING_MODE  shuffle=${SHUFFLE:-none}"
 echo "Checkpoints: $CKPTDIR"
 echo "Output:      $OUTDIR"
 echo "Submitting ${#SUBJECTS[@]} eval jobs ..."
 
 for SUBJ in "${SUBJECTS[@]}"; do
-  CKPT=$CKPTDIR/stage1_best_${SUBJ}_${ANNEAL_MODE}_${POOLING_MODE}.pt
+  CKPT=$CKPTDIR/stage1_best_${SUBJ}_${ANNEAL_MODE}_${POOLING_MODE}${CKPTSUF}.pt
   jid=$(sbatch "${SBATCH_BASE[@]}" \
-    --job-name="nc_eval_${SUBJ}_${ANNEAL_MODE}" \
+    --job-name="nc_eval_${SUBJ}_${ANNEAL_MODE}${TAGSUF}" \
     --parsable \
     --wrap="cd $WORKDIR && python eval_stage1.py \
       --stage1_checkpoint_path $CKPT \

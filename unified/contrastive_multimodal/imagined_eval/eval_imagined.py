@@ -182,7 +182,10 @@ def main(args):
     bank = (bv.to(device), bl.to(device), bwt, type_to_id)
     print(f"Candidate bank: {bv.shape[0]} occurrences, {len(type_to_id)} unique word types")
 
-    out_dir = Path(args.out_root) / args.mapping_key
+    # out_suffix disambiguates the decoder identity (e.g. "_shuffled") so a
+    # shuffle-trained decoder's imagined results land in results/{mapping_key}_shuffled/
+    # instead of overwriting the real decoder's results/{mapping_key}/.
+    out_dir = Path(args.out_root) / f"{args.mapping_key}{args.out_suffix}"
     out_dir.mkdir(parents=True, exist_ok=True)
     trace_dir = str(out_dir) if args.save_traces else None
 
@@ -242,7 +245,11 @@ def build_arg_parser():
                    default=str(Path(__file__).resolve().parent.parent / "checkpoints" / "joint_annealed_exact"),
                    help="Dir with stage1_best_{subj}_{tag}.pt checkpoints.")
     p.add_argument("--stage1_tag", type=str, default="joint_annealed_exact",
-                   help="Suffix in the checkpoint filename after the subject.")
+                   help="Suffix in the checkpoint filename after the subject. For a shuffle-trained "
+                        "decoder pass e.g. joint_annealed_exact_shuffled.")
+    p.add_argument("--out_suffix", type=str, default="",
+                   help="Appended to the results/{mapping_key} output folder to separate decoder "
+                        "variants (e.g. '_shuffled'). Default '' keeps the existing real-decoder path.")
     p.add_argument("--teacher_cache_path", type=str,
                    default=str(Path(__file__).resolve().parent.parent / "teacher_cache.pt"))
     p.add_argument("--subjects", type=str, nargs="*", default=None,

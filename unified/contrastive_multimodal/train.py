@@ -47,6 +47,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from new_dataset import MEGContinuousTrialDataset, collate_continuous_trials
+from new_controls import make_control
 from new_models import MEGEncoder, AudioProjectionHead, WordProjectionHead, JOINT_DIM, TOTAL_STRIDE
 from pooling import WordAttentionPooling, pool_words, raw_length_to_encoder_frames
 from losses import audio_contrastive_loss, llm_contrastive_loss, stage1_anneal_weights
@@ -274,6 +275,17 @@ def main(args):
     # here to keep this script's primary path simple; add if .fif loading
     # becomes a real bottleneck.
 
+    # Train-time shuffle_time control: re-pair each word position to a wrong
+    # onset within its own trial (make_control), so the model is trained on
+    # broken MEG<->word timing. Applied to BOTH train and val so val loss is a
+    # consistent early-stopping signal within the shuffled regime, and marked
+    # in the checkpoint name so shuffled models never overwrite real ones.
+    shuffle_seed = args.shuffle_seed if args.shuffle_seed is not None else args.seed
+    if args.shuffle_train:
+        train_ds = make_control(train_ds, "shuffle_time", seed=shuffle_seed)
+        val_ds   = make_control(val_ds,   "shuffle_time", seed=shuffle_seed)
+        print(f"[shuffle_train] train+val wrapped with shuffle_time control (seed={shuffle_seed})")
+
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                                collate_fn=collate_continuous_trials)
     val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
@@ -327,9 +339,13 @@ def main(args):
                 "epoch": epoch, "val_loss": val_loss,
                 "heldout_subject": args.heldout_subject, "anneal_mode": args.anneal_mode,
                 "pooling_mode": args.pooling_mode,
+                "control": "shuffle_time" if args.shuffle_train else "none",
+                "shuffle_seed": shuffle_seed if args.shuffle_train else None,
             }
+            suffix = "_shuffled" if args.shuffle_train else ""
             path = os.path.join(
-                args.out_dir, f"stage1_best_{args.heldout_subject}_{args.anneal_mode}_{args.pooling_mode}.pt"
+                args.out_dir,
+                f"stage1_best_{args.heldout_subject}_{args.anneal_mode}_{args.pooling_mode}{suffix}.pt"
             )
             torch.save(ckpt, path)
             print(f"  [saved new best checkpoint -> {path}]")
@@ -496,6 +512,13 @@ def build_arg_parser():
     p.add_argument("--meg_base", type=str, default="/fs/nexus-projects/brain_project/maryam_meg_dataset/icaed_Sai")
     p.add_argument("--out_dir", type=str, default="./checkpoints")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--shuffle_train", action="store_true",
+                    help="Train-time shuffle_time control: re-pair MEG windows to wrong word onsets "
+                         "(within each trial) for BOTH train and val. Saves the model with a "
+                         "'_shuffled' suffix so it never overwrites the real-data checkpoint.")
+    p.add_argument("--shuffle_seed", type=int, default=None,
+                    help="Seed for the shuffle_time permutation (default: --seed). Only used with "
+                         "--shuffle_train.")
     p.add_argument("--dry_run", action="store_true",
                     help="Run the synthetic end-to-end smoke test instead of real training. "
                          "No .fif files, teacher_cache.pt, or GPU required.")

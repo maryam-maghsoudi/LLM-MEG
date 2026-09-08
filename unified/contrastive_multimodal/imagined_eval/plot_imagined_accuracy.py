@@ -41,18 +41,25 @@ from analyze_stage1 import analyze_trace, SUBJECTS, HERE   # noqa: E402
 _THIS_DIR = Path(__file__).resolve().parent
 
 
-def collect(tag, mapping_key):
+def collect(tag, mapping_key, results_suffix=""):
     """Returns (rows, chance_top1_pct, chance_top5_pct, has_shuffle).
 
     rows: list of dicts with listened + imagined (+ imagined-shuffle, if present)
     top-1/top-5 (%) per subject, for subjects present in BOTH the listened
     traces and the imagined summary.
+
+    tag selects the listened traces (../eval_results/{tag}/); results_suffix is
+    appended to the imagined results folder (results/{mapping_key}{suffix}/) so a
+    shuffle-trained decoder (tag=..._shuffled, suffix=_shuffled) reads its own
+    listened and imagined results, not the real decoder's.
     """
     trace_dir = HERE / "eval_results" / tag
-    summary_path = _THIS_DIR / "results" / mapping_key / "summary.json"
+    summary_path = _THIS_DIR / "results" / f"{mapping_key}{results_suffix}" / "summary.json"
     if not summary_path.exists():
         raise FileNotFoundError(
-            f"No imagined summary at {summary_path} — run eval_imagined.py --mapping_key {mapping_key} first."
+            f"No imagined summary at {summary_path} — run eval_imagined.py "
+            f"--mapping_key {mapping_key}"
+            + (f" --out_suffix {results_suffix}" if results_suffix else "") + " first."
         )
     summary = json.loads(summary_path.read_text())
     imagined = {r["subject"]: r for r in summary["per_subject"]}
@@ -140,16 +147,17 @@ def make_plot(rows, tag, mapping_key, out_path, k, chance_pct, has_shuffle):
 
 
 def _out_path_for_k(args, k):
-    """Default: results/{mapping_key}/wordacc_listened_vs_imagined_{mapping_key}_top{k}.png.
+    """Default: results/{mapping_key}{results_suffix}/wordacc_listened_vs_imagined_{mapping_key}{results_suffix}_top{k}.png.
     If --out given, insert _top{k} before its suffix so both figures are distinct."""
     if args.out:
         base = Path(args.out)
         return base.with_name(f"{base.stem}_top{k}{base.suffix or '.png'}")
-    return _THIS_DIR / "results" / args.mapping_key / f"wordacc_listened_vs_imagined_{args.mapping_key}_top{k}.png"
+    name = f"{args.mapping_key}{args.results_suffix}"
+    return _THIS_DIR / "results" / name / f"wordacc_listened_vs_imagined_{name}_top{k}.png"
 
 
 def main(args):
-    rows, chance1, chance5, has_shuffle = collect(args.tag, args.mapping_key)
+    rows, chance1, chance5, has_shuffle = collect(args.tag, args.mapping_key, args.results_suffix)
     if not rows:
         print("No data collected.")
         return
@@ -176,7 +184,10 @@ def build_arg_parser():
     p.add_argument("--tag", type=str, default="joint_annealed_exact",
                    help="Stage 1 checkpoint tag (selects ../eval_results/{tag}/ listened traces).")
     p.add_argument("--mapping_key", type=str, default="RNN_full",
-                   help="Imagined mapping key (selects results/{mapping_key}/summary.json).")
+                   help="Imagined mapping key (selects results/{mapping_key}{results_suffix}/summary.json).")
+    p.add_argument("--results_suffix", type=str, default="",
+                   help="Appended to the imagined results folder, matching eval_imagined.py --out_suffix "
+                        "(e.g. '_shuffled'). Pair with --tag ..._shuffled to plot a shuffle-trained decoder.")
     p.add_argument("--out", type=str, default=None)
     return p
 
