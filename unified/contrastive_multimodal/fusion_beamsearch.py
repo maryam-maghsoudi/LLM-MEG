@@ -47,11 +47,9 @@ from splits import make_loso_splits
 
 _EPS = 1e-8
 
-# Same grid as teacher-forced for direct comparison
-ALPHA_GRID = [round(a, 2) for a in (
-    [i * 0.05 for i in range(19)]
-    + [0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99, 1.00]
-)]
+# Uniform alpha sweep: 0 → 1 in steps of 0.03 (0.00, 0.03, ..., 0.99),
+# plus the 1.0 (LLM-only) endpoint so the pure-LLM baseline is retained.
+ALPHA_GRID = [round(0.03 * i, 2) for i in range(34)] + [1.0]
 
 
 # ===========================================================================
@@ -627,8 +625,11 @@ def main(args):
           f"B={args.beam_width}  top_k={args.top_k} ===")
     print(f"{'alpha':>6}  {'BLEU-1':>8}  {'word_acc':>9}")
     for alpha in [0.0, 0.25, 0.5, 0.75, 1.0]:
-        r = results[str(alpha)]
-        print(f"{alpha:6.2f}  {r['bleu1']*100:7.2f}%  {r['word_acc']*100:8.2f}%")
+        # Grid is 0.03-spaced, so 0.25/0.5 aren't exact keys — fall back to nearest.
+        key = str(alpha) if str(alpha) in results else min(
+            results.keys(), key=lambda kk: abs(float(kk) - alpha))
+        r = results[key]
+        print(f"{float(key):6.2f}  {r['bleu1']*100:7.2f}%  {r['word_acc']*100:8.2f}%")
 
     # Save JSON
     os.makedirs(args.out_dir, exist_ok=True)

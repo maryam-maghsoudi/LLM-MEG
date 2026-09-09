@@ -158,6 +158,7 @@ def main(args):
     n_saved = n_missing = 0
 
     for subj in subjects:
+        # loading the mapping model
         ckpt_dir = os.path.join(LOSO_MODELS, f"heldout_{subj}")
         if is_ridge:
             ckpt_path = os.path.join(ckpt_dir, "LinearLag_W.npy")
