@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Language Models in Listened and Imagined Speech Decoding from MEG</title>
+<meta name="description" content="A contrastive MEG decoder aligned to wav2vec 2.0 and GPT-2, plus neural-constrained beam search. Imagined speech relies more on the language model and gains more from it.">
+<meta property="og:title" content="Integrating Language Models into Listened and Imagined Speech Decoding from MEG">
+<meta property="og:description" content="Imagined speech shifts the optimal neural/language balance toward the language model, and gains more from it.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#F2F4F7; --surface:#FFFFFF; --ink:#17202E; --muted:#556275; --rule:#D3DAE3;
+  --neural:#2B6A99; --neural-soft:#DCE8F2; --language:#A8325E; --language-soft:#F3DDE6;
+  --grey-bar:#AEB8C5; --code-bg:#E7EBF0;
+  --measure:40rem; --wide:58rem;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#121821; --surface:#19212C; --ink:#E6EBF2; --muted:#9AA6B6; --rule:#2B3544;
+    --neural:#71AAD8; --neural-soft:#1E3346; --language:#E27FA3; --language-soft:#3A2230;
+    --grey-bar:#536173; --code-bg:#1D2632;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#121821; --surface:#19212C; --ink:#E6EBF2; --muted:#9AA6B6; --rule:#2B3544;
+  --neural:#71AAD8; --neural-soft:#1E3346; --language:#E27FA3; --language-soft:#3A2230;
+  --grey-bar:#536173; --code-bg:#1D2632;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:"Spectral",Georgia,serif;font-size:1.1rem;line-height:1.62;font-feature-settings:"onum" 1,"kern" 1}
+a{color:var(--neural);text-underline-offset:.18em;text-decoration-thickness:1px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--neural);outline-offset:3px;border-radius:2px}
+code,pre,kbd{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.84em}
+.wrap{max-width:var(--wide);margin:0 auto;padding:0 16px}
+.prose{max-width:var(--measure)}
+h1,h2,h3{font-weight:500;line-height:1.2;letter-spacing:-.005em}
+h2{font-size:1.75rem;margin:0 0 .9rem}
+h3{font-size:1.2rem;margin:1.8rem 0 .5rem;font-weight:600}
+p{margin:0 0 1rem}
+section{padding:3.25rem 0;border-top:1px solid var(--rule)}
+
+/* Header */
+header{padding:3.5rem 0 2rem}
+h1{font-size:clamp(1.9rem,4.6vw,2.9rem);margin:0 0 1.4rem;max-width:22ch;font-weight:500}
+.authors{font-size:1.15rem;margin:0 0 .35rem}
+.authors span{white-space:nowrap}
+.affil{color:var(--muted);font-size:.98rem;margin:0 0 1.6rem}
+sup{font-size:.68em;line-height:0}
+.links{display:flex;flex-wrap:wrap;gap:.6rem;margin:0;padding:0;list-style:none}
+.links a{display:inline-block;padding:.45rem 1rem;border:1px solid var(--ink);color:var(--ink);text-decoration:none;font-size:1rem;border-radius:999px}
+.links a:hover{background:var(--ink);color:var(--paper)}
+
+/* Balance (hero instrument) */
+.balance{margin:2.6rem 0 0;background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:1.6rem 1.4rem 1.4rem}
+.eq{font-size:clamp(1.25rem,3.6vw,2.1rem);line-height:1.35;margin:0 0 1.2rem;font-variant-numeric:lining-nums tabular-nums}
+.eq .n{color:var(--neural);font-weight:600}
+.eq .l{color:var(--language);font-weight:600}
+.eq .k{font-style:italic}
+.split{display:flex;height:14px;border-radius:7px;overflow:hidden;margin:0 0 .9rem;background:var(--rule)}
+.split .sn{background:var(--neural);transition:flex-basis .12s linear}
+.split .sl{background:var(--language);transition:flex-basis .12s linear}
+.slider-row{display:flex;align-items:center;gap:1rem}
+.slider-row label{white-space:nowrap;font-style:italic}
+input[type=range]{flex:1;accent-color:var(--ink);min-width:0}
+.balance-note{color:var(--muted);font-size:1rem;margin:1rem 0 0;max-width:var(--measure);min-height:3.2em}
+@media (prefers-reduced-motion: reduce){.split .sn,.split .sl{transition:none}}
+
+.finding{font-size:clamp(1.25rem,2.6vw,1.5rem);line-height:1.45;max-width:34ch;margin:2.4rem 0 0}
+
+/* Figures */
+figure{margin:2rem 0}
+figure svg{display:block;width:100%;height:auto}
+figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:var(--measure)}
+figcaption b{color:var(--ink);font-weight:600}
+.paper-fig img{display:block;width:100%;height:auto;background:#fff;border:1px solid var(--rule);border-radius:6px}
+.diagram{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:1rem;overflow-x:auto}
+@media (max-width:640px){.diagram svg{min-width:620px}}
+.d-box{fill:var(--paper);stroke:var(--rule);stroke-width:1.2}
+.d-neural{fill:var(--neural-soft);stroke:var(--neural);stroke-width:1.4}
+.d-lang{fill:var(--language-soft);stroke:var(--language);stroke-width:1.4}
+.d-t{fill:var(--ink);font-family:"Spectral",Georgia,serif;font-size:15px}
+.d-s{fill:var(--muted);font-family:"Spectral",Georgia,serif;font-size:12.5px}
+.d-tn{fill:var(--neural);font-family:"Spectral",Georgia,serif;font-size:13px;font-style:italic}
+.d-tl{fill:var(--language);font-family:"Spectral",Georgia,serif;font-size:13px;font-style:italic}
+.d-a{stroke:var(--muted);stroke-width:1.4;fill:none}
+.d-an{stroke:var(--neural);stroke-width:1.4;fill:none;stroke-dasharray:4 3}
+.d-al{stroke:var(--language);stroke-width:1.4;fill:none;stroke-dasharray:4 3}
+.d-head{fill:var(--muted)}
+.d-panel{fill:var(--ink);font-family:"Spectral",Georgia,serif;font-size:16px;font-weight:600}
+
+/* Results */
+.table-scroll{overflow-x:auto;margin:1.5rem 0}
+table{border-collapse:collapse;width:100%;min-width:30rem;font-variant-numeric:lining-nums tabular-nums;font-size:1rem}
+th,td{text-align:left;padding:.55rem .75rem;border-bottom:1px solid var(--rule)}
+th{font-weight:600}
+td.num,th.num{text-align:right;white-space:nowrap}
+tbody tr.ours td{background:var(--neural-soft)}
+tbody tr.group-start td{border-top:1.5px solid var(--ink)}
+.table-note{color:var(--muted);font-size:.95rem;max-width:var(--measure)}
+
+.bars{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1.5rem 2.5rem;margin:1.5rem 0}
+.bars h3{margin:0 0 .6rem;font-size:1.05rem}
+.bar-group{margin:0 0 1rem}
+.bar-group .g{font-style:italic;color:var(--muted);font-size:.95rem;margin:0 0 .3rem}
+.bar-row{display:grid;grid-template-columns:5.5rem minmax(0,1fr) 3.4rem;align-items:center;gap:.6rem;font-size:.92rem;margin:.18rem 0}
+.bar-row .lab{color:var(--muted)}
+.bar-track{position:relative;height:12px}
+.bar-fill{position:absolute;left:0;top:0;bottom:0;background:var(--grey-bar);border-radius:0 3px 3px 0}
+.bar-row.ours .bar-fill{background:var(--neural)}
+.bar-row.ours .lab,.bar-row.ours .v{color:var(--ink);font-weight:600}
+.bar-err{position:absolute;top:50%;height:1.5px;background:var(--ink);transform:translateY(-50%)}
+.bar-row .v{text-align:right;font-variant-numeric:lining-nums tabular-nums}
+@media (max-width:640px){.bars{grid-template-columns:1fr}}
+
+.claims{list-style:none;padding:0;margin:1.2rem 0 0;max-width:var(--measure)}
+.claims li{padding:0 0 0 1.1rem;border-left:3px solid var(--rule);margin:0 0 1.2rem}
+.claims li.n{border-left-color:var(--neural)}
+.claims li.l{border-left-color:var(--language)}
+.claims strong{font-weight:600}
+
+/* Code */
+.files{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.35rem 1.4rem;margin:1.2rem 0 2rem;font-size:1rem}
+.files dt code{font-size:.85rem;color:var(--ink)}
+.files dd{margin:0;color:var(--muted)}
+.files .grp{grid-column:1/-1;margin:1rem 0 .2rem;font-weight:600}
+@media (max-width:640px){.files{grid-template-columns:1fr}.files dd{margin-bottom:.5rem}}
+pre{background:var(--code-bg);border-radius:8px;padding:1rem 1.1rem;overflow-x:auto;line-height:1.55;margin:.6rem 0 1.4rem}
+pre .c{color:var(--muted)}
+p code,li code,dd code,td code{background:var(--code-bg);padding:.08em .32em;border-radius:4px}
+pre code,li pre code{background:none;padding:0;border-radius:0}
+.steps{padding-left:1.3rem;max-width:var(--wide)}
+.steps>li{margin:0 0 .4rem;padding-left:.3rem}
+.steps>li>p{max-width:var(--measure);margin:0}
+.map{font-size:1rem}
+.map td:first-child{white-space:nowrap}
+
+.cite{position:relative}
+.cite pre{padding-right:5.5rem}
+.copy{position:absolute;top:.6rem;right:.6rem;font:inherit;font-size:.9rem;background:var(--surface);color:var(--ink);border:1px solid var(--rule);border-radius:999px;padding:.25rem .8rem;cursor:pointer}
+.copy:hover{border-color:var(--ink)}
+
+footer{border-top:1px solid var(--rule);padding:2rem 0 3rem;color:var(--muted);font-size:.95rem}
+.theme-toggle{font:inherit;font-size:.95rem;background:none;border:0;color:var(--neural);text-decoration:underline;text-underline-offset:.18em;cursor:pointer;padding:0}
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <h1>Integrating Language Models into Listened and Imagined Speech Decoding from MEG</h1>
+  <p class="authors">
+    <span>Maryam Maghsoudi<sup>1</sup>,</span>
+    <span>Sai Samrat Kankanala<sup>2</sup>,</span>
+    <span>Shihab A. Shamma<sup>1</sup>,</span>
+    <span>Sriram Ganapathy<sup>2</sup></span>
+  </p>
+  <p class="affil"><sup>1</sup>University of Maryland, College Park &nbsp; <sup>2</sup>LEAP Lab, Indian Institute of Science, Bengaluru</p>
+  <ul class="links">
+    <li><a href="https://arxiv.org/pdf/2609.31997">Paper (PDF)</a></li>
+    <li><a href="https://arxiv.org/abs/2609.31997">arXiv</a></li>
+    <li><a href="https://github.com/maryam-maghsoudi/LLM-MEG/tree/main/unified/contrastive_multimodal_v2">Code</a></li>
+    <li><a href="#citation">BibTeX</a></li>
+  </ul>
+
+  <div class="balance" aria-labelledby="balance-title">
+    <p class="eq" id="balance-title">
+      score(<span class="k">w</span>) =
+      <span class="n" id="wn">0.50</span> · <span class="n">MEG</span>(<span class="k">w</span>)
+      + <span class="l" id="wl">0.50</span> · <span class="l">LLM</span>(<span class="k">w</span>)
+    </p>
+    <div class="split" aria-hidden="true"><div class="sn" id="sn" style="flex-basis:50%"></div><div class="sl" id="sl" style="flex-basis:50%"></div></div>
+    <div class="slider-row">
+      <label for="alpha">α</label>
+      <input type="range" id="alpha" min="0" max="1" step="0.01" value="0.5" aria-describedby="balance-note">
+    </div>
+    <p class="balance-note" id="balance-note" aria-live="polite"></p>
+  </div>
+
+  <p class="finding">Weak neural evidence calls for a stronger language prior. Imagined speech shifts the best balance toward the language model and gains more from it than listened speech does.</p>
+</header>
+
+<main>
+<section id="abstract">
+  <div class="wrap"><div class="prose">
+    <h2>Abstract</h2>
+    <p>Decoding imagined speech from brain signals matters for brain-computer interfaces, but imagined-speech responses are weak, noisy and scarce. We ask whether language models help, and whether they help listened and imagined speech to the same degree.</p>
+    <p>Using a paired listened/imagined MEG dataset, we bring language-model information in at two stages. During training, a contrastive neural decoder aligns MEG with acoustic and language representations, which improves cross-subject word decoding in both conditions. At inference, a neural-constrained beam search combines neural evidence with language-model next-word probabilities. Imagined speech benefits more: its optimal balance moves toward the language model, and its gain over neural-only decoding is larger.</p>
+  </div></div>
+</section>
+
+<section id="method">
+  <div class="wrap">
+    <div class="prose">
+      <h2>Method</h2>
+      <p>Seventeen participants listened to and imagined two 27-second poems, ten repetitions per condition; 13 remained after quality control. Imagined MEG is mapped to estimated listened responses with a leave-one-subject-out mapping model <a href="https://arxiv.org/abs/2605.08075">[11]</a>, using six mapping variants whose results are averaged.</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 330" role="img" aria-labelledby="figA-t figA-d">
+        <title id="figA-t">Stage A: contextual contrastive decoder</title>
+        <desc id="figA-d">MEG passes through a spatial convolution and a causal dilated temporal network. Frame-level outputs align with wav2vec 2.0 layer 6; word-pooled outputs align with GPT-2 layer 8. The two losses are weighted by lambda, annealed from 0.8 to 0.2.</desc>
+        <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-head"/></marker></defs>
+        <text x="8" y="22" class="d-panel">A. Training the decoder</text>
+
+        <rect x="8" y="128" width="112" height="64" rx="8" class="d-box"/>
+        <text x="64" y="156" text-anchor="middle" class="d-t">MEG</text>
+        <text x="64" y="176" text-anchor="middle" class="d-s">155 sensors</text>
+
+        <rect x="150" y="118" width="190" height="84" rx="8" class="d-neural"/>
+        <text x="245" y="146" text-anchor="middle" class="d-t">Shared encoder</text>
+        <text x="245" y="166" text-anchor="middle" class="d-s">1×1 spatial conv</text>
+        <text x="245" y="184" text-anchor="middle" class="d-s">causal dilated TCN, ~50 Hz</text>
+        <path d="M120 160 H146" class="d-a" marker-end="url(#ah)"/>
+
+        <rect x="390" y="56" width="140" height="56" rx="8" class="d-box"/>
+        <text x="460" y="80" text-anchor="middle" class="d-t">Frame head</text>
+        <text x="460" y="99" text-anchor="middle" class="d-s">every ~20 ms frame</text>
+        <rect x="390" y="208" width="140" height="56" rx="8" class="d-box"/>
+        <text x="460" y="232" text-anchor="middle" class="d-t">Word head</text>
+        <text x="460" y="251" text-anchor="middle" class="d-s">mean-pooled per word</text>
+        <path d="M340 145 C365 145 365 84 386 84" class="d-a" marker-end="url(#ah)"/>
+        <path d="M340 175 C365 175 365 236 386 236" class="d-a" marker-end="url(#ah)"/>
+
+        <rect x="604" y="56" width="148" height="56" rx="8" class="d-box"/>
+        <text x="678" y="80" text-anchor="middle" class="d-t">wav2vec 2.0</text>
+        <text x="678" y="99" text-anchor="middle" class="d-s">layer 6, frozen</text>
+        <rect x="604" y="208" width="148" height="56" rx="8" class="d-lang"/>
+        <text x="678" y="232" text-anchor="middle" class="d-t">GPT-2</text>
+        <text x="678" y="251" text-anchor="middle" class="d-s">layer 8, frozen</text>
+        <path d="M534 84 H600" class="d-an"/>
+        <path d="M534 236 H600" class="d-al"/>
+        <text x="567" y="74" text-anchor="middle" class="d-tn">InfoNCE</text>
+        <text x="567" y="226" text-anchor="middle" class="d-tl">InfoNCE</text>
+
+        <text x="460" y="152" text-anchor="middle" class="d-t">λ · acoustic + (1 − λ) · language</text>
+        <text x="460" y="172" text-anchor="middle" class="d-s">λ: cosine anneal 0.8 → 0.2 over 15 epochs</text>
+        <text x="8" y="312" class="d-s">Targets only pick out positives; wav2vec 2.0 and GPT-2 never feed the encoder.</text>
+      </svg>
+    </figure>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 300" role="img" aria-labelledby="figB-t figB-d">
+        <title id="figB-t">Stage B: neural-constrained beam search</title>
+        <desc id="figB-d">For each word position, the frozen decoder ranks the vocabulary by cosine similarity and proposes the top k words. GPT-2 scores each candidate given that beam's own history. Both scores are z-scored and mixed with weight alpha, and the best B sequences are kept.</desc>
+        <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-head"/></marker></defs>
+        <text x="8" y="22" class="d-panel">B. Decoding with the language model</text>
+
+        <rect x="8" y="56" width="168" height="74" rx="8" class="d-neural"/>
+        <text x="92" y="84" text-anchor="middle" class="d-t">Frozen decoder</text>
+        <text x="92" y="104" text-anchor="middle" class="d-s">MEG for word position t</text>
+
+        <rect x="214" y="56" width="168" height="74" rx="8" class="d-box"/>
+        <text x="298" y="84" text-anchor="middle" class="d-t">Top-k candidates</text>
+        <text x="298" y="104" text-anchor="middle" class="d-s">max cosine to GPT-2 bank</text>
+        <path d="M176 93 H210" class="d-a" marker-end="url(#ah2)"/>
+
+        <rect x="214" y="186" width="168" height="74" rx="8" class="d-lang"/>
+        <text x="298" y="214" text-anchor="middle" class="d-t">GPT-2 next word</text>
+        <text x="298" y="234" text-anchor="middle" class="d-s">given each beam's history</text>
+        <path d="M298 130 V182" class="d-a" marker-end="url(#ah2)"/>
+
+        <rect x="420" y="112" width="190" height="90" rx="8" class="d-box"/>
+        <text x="515" y="140" text-anchor="middle" class="d-t">Fuse</text>
+        <text x="515" y="161" text-anchor="middle" class="d-s">z-score each side</text>
+        <text x="515" y="182" text-anchor="middle" class="d-s">(1 − α)·MEG + α·LLM</text>
+        <path d="M382 93 C402 93 402 140 416 140" class="d-an" marker-end="url(#ah2)"/>
+        <path d="M382 223 C402 223 402 176 416 176" class="d-al" marker-end="url(#ah2)"/>
+
+        <rect x="648" y="112" width="104" height="90" rx="8" class="d-box"/>
+        <text x="700" y="148" text-anchor="middle" class="d-t">Keep</text>
+        <text x="700" y="168" text-anchor="middle" class="d-t">top B</text>
+        <path d="M610 157 H644" class="d-a" marker-end="url(#ah2)"/>
+        <path d="M700 202 V280 H40 V134" class="d-a" marker-end="url(#ah2)"/>
+        <text x="380" y="274" text-anchor="middle" class="d-s">next position, t + 1</text>
+      </svg>
+      <figcaption><b>Inference.</b> The decoder decides which words are candidates; the language model only reorders them. Teacher-forced fusion, used as an upper bound, gives GPT-2 the true preceding words instead of the beam's own history.</figcaption>
+    </figure>
+
+    <figure class="paper-fig" data-optional>
+      <img src="figures/fig1.png" alt="Figure 1 from the paper: training and inference schematic">
+      <figcaption><b>Figure 1 (paper).</b> (A) A shared MEG encoder trained with frame-level and word-level contrastive losses, weighted by λ. (B) Neural-constrained beam search fusing decoder and language-model scores with weight α.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="results">
+  <div class="wrap">
+    <div class="prose">
+      <h2>Results</h2>
+      <h3 style="margin-top:0">The contextual decoder</h3>
+      <p>Word decoding on held-out subjects, scored against the full candidate bank. The proposed decoder improves sharply on the previous one for listened MEG and carries over to mapped imagined MEG, where it beats the shuffled control for all six mappings at top-1 and top-5 (p &lt; 0.001).</p>
+    </div>
+
+    <div class="bars" id="bars" aria-hidden="true"></div>
+
+    <div class="table-scroll">
+      <table aria-label="Table 1: word decoding performance">
+        <thead><tr><th scope="col">Input</th><th scope="col">Decoder</th><th scope="col" class="num">Top-1 (%)</th><th scope="col" class="num">Top-5 (%)</th></tr></thead>
+        <tbody>
+          <tr class="group-start"><td>Listened</td><td>Previous [11]</td><td class="num">1.44 ± 0.16</td><td class="num">7.45 ± 0.60</td></tr>
+          <tr class="ours"><td>Listened</td><td>Proposed</td><td class="num">14.17 ± 0.81</td><td class="num">46.96 ± 1.56</td></tr>
+          <tr><td>Listened</td><td>Proposed, shuffled</td><td class="num">4.12 ± 0.10</td><td class="num">18.41 ± 0.18</td></tr>
+          <tr class="group-start"><td>Mapped imagined</td><td>Previous [11]</td><td class="num">1.26 ± 0.09</td><td class="num">6.71 ± 0.21</td></tr>
+          <tr class="ours"><td>Mapped imagined</td><td>Proposed</td><td class="num">7.05 ± 0.35</td><td class="num">31.14 ± 0.97</td></tr>
+          <tr><td>Mapped imagined</td><td>Proposed, shuffled</td><td class="num">3.93 ± 0.08</td><td class="num">18.69 ± 0.14</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="table-note">Table 1. Mean ± SEM across held-out subjects (LOSO). Imagined results average six imagined-to-listened mappings. "Previous" is the decoder of [11]; "shuffled" trains on shuffled neural targets.</p>
+
+    <div class="prose">
+      <p>With an all-zero MEG input, accuracy falls to chance. The acoustic objective also matters: trained on the language objective alone, the decoder can score above chance by predicting frequent words. Mapped imagined top-1 is about half of listened top-1, so imagined responses carry weaker neural evidence.</p>
+
+      <h3>Adding the language model</h3>
+      <ul class="claims">
+        <li class="l"><strong>Teacher forcing hides the trade-off.</strong> When GPT-2 sees the true history, accuracy keeps rising with α until α is close to 1 and both conditions converge. Neural evidence adds little once the context is perfect.</li>
+        <li class="n"><strong>Beam search has an interior optimum.</strong> With the beam's own history (B = 3, k = 10), both conditions peak at an intermediate α, and joint scoring beats MEG-only ranking in both (p &lt; 0.001). Both stay above the random-candidate null at every α.</li>
+        <li class="l"><strong>The endpoints flip.</strong> For listened MEG, MEG alone (α = 0) beats the language model alone (α = 1), and fusion stays above the LLM-only baseline at every α. For mapped imagined MEG the order reverses, and fusion beats LLM-only only in a window near its optimum.</li>
+        <li class="n"><strong>Imagined speech leans further toward the language model.</strong> Across candidate-set sizes k, the optimal α* is higher for mapped imagined than for listened MEG (p &lt; 0.01), and the relative gain over MEG-only ranking at α* is larger (p &lt; 0.001). The fall-off toward α = 1 steepens as k grows.</li>
+      </ul>
+      <p>The same pattern appears when GPT-2 is replaced with SmolLM, so the effect is not specific to one language model.</p>
+    </div>
+
+    <figure class="paper-fig" data-optional>
+      <img src="figures/fig2.png" alt="Figure 2 from the paper: word accuracy versus fusion weight alpha">
+      <figcaption><b>Figure 2.</b> Word accuracy versus α. (A) Teacher-forced fusion. (B, C) Beam search (B = 3, k = 10) for listened and mapped imagined MEG, against a random-candidate null and LLM-only beam search over the full vocabulary. Shading is SEM across subjects; markers show the best α.</figcaption>
+    </figure>
+    <figure class="paper-fig" data-optional>
+      <img src="figures/fig3.png" alt="Figure 3 from the paper: optimal alpha and relative gain for listened and imagined MEG">
+      <figcaption><b>Figure 3.</b> The neural/language balance. Accuracy versus α for several k at B = 3, the relative gain over MEG-only ranking at α* with paired per-subject lines, and α* for each k. Mapped imagined MEG has the higher α* and the larger gain.</figcaption>
+    </figure>
+
+    <div class="prose">
+      <h3>Limitations</h3>
+      <p>Two poems, a closed vocabulary, 13 participants who are all musicians, and known word boundaries. Leave-one-subject-out tests generalization to new people, not to unseen stimuli or continuous speech.</p>
+    </div>
+  </div>
+</section>
+
+<section id="code">
+  <div class="wrap">
+    <div class="prose">
+      <h2>Code</h2>
+      <p>Everything for this paper lives in <a href="https://github.com/maryam-maghsoudi/LLM-MEG/tree/main/unified/contrastive_multimodal_v2"><code>unified/contrastive_multimodal_v2</code></a>. Scripts are run from inside that folder.</p>
+    </div>
+
+    <dl class="files">
+      <dt class="grp">Data and targets</dt>
+      <dt><code>teacher_cache.py</code></dt><dd>Builds the frozen wav2vec 2.0 and GPT-2 targets for both poems once and saves <code>teacher_cache.pt</code>.</dd>
+      <dt><code>new_dataset.py</code></dt><dd>Loads whole MEG trials with word onsets and offsets.</dd>
+      <dt><code>splits.py</code></dt><dd>Leave-one-subject-out splits; a trial is never split across partitions.</dd>
+
+      <dt class="grp">Decoder</dt>
+      <dt><code>new_models.py</code></dt><dd>Causal convolutional MEG encoder and the frame and word projection heads.</dd>
+      <dt><code>pooling.py</code></dt><dd>Per-word pooling: mean over the word span (<code>exact</code>) or learned attention over a wider window (<code>wide</code>).</dd>
+      <dt><code>losses.py</code></dt><dd>Frame-level InfoNCE, word-level multi-positive InfoNCE and the λ anneal.</dd>
+      <dt><code>train.py</code></dt><dd>Trains the decoder for one held-out subject with early stopping.</dd>
+
+      <dt class="grp">Evaluation</dt>
+      <dt><code>eval_stage1.py</code></dt><dd>Top-1 and top-5 word accuracy, with zero-MEG and time-shuffled controls.</dd>
+      <dt><code>new_controls.py</code>, <code>metrics.py</code></dt><dd>Control datasets, label-aware top-k scoring and chance levels.</dd>
+      <dt><code>fusion_teacher_forced.py</code></dt><dd>Teacher-forced fusion sweep over α (upper bound).</dd>
+      <dt><code>fusion_beamsearch.py</code></dt><dd>Neural-constrained beam search, swept over α.</dd>
+      <dt><code>fusion_beamsearch_null.py</code></dt><dd>Same search with random candidates in place of the decoder's top-k.</dd>
+      <dt><code>imagined_eval/</code></dt><dd>The three fusion scripts above, run on mapped imagined MEG.</dd>
+      <dt><code>plot_beam_grid.py</code>, <code>plot_beam_k_overlay.py</code></dt><dd>Figures for the B × k × α sweeps.</dd>
+    </dl>
+
+    <h3>Running it</h3>
+    <ol class="steps">
+      <li><p>Install Python 3.10+ and the dependencies.</p>
+<pre><code>pip install torch torchaudio transformers numpy nltk matplotlib
+pip install openpyxl   <span class="c"># optional, for colour-coded Excel traces</span></code></pre></li>
+      <li><p>Point the data paths at your copy of the dataset: <code>MEG_BASE</code> and <code>ONSET_DIR</code> at the top of <code>new_dataset.py</code>, and <code>ONSET_DIR</code> and <code>AUDIO_DIR</code> in the <code>__main__</code> block of <code>teacher_cache.py</code>. Then build the targets.</p>
+<pre><code>python teacher_cache.py</code></pre></li>
+      <li><p>Train one decoder per held-out subject. The defaults already use wav2vec 2.0 layer 6, GPT-2 layer 8 and the cosine anneal; <code>--pooling_mode exact</code> gives the mean-pooled words used in the paper.</p>
+<pre><code>python train.py --heldout_subject sub-01 --pooling_mode exact \
+    --out_dir checkpoints/joint_annealed_exact</code></pre></li>
+      <li><p>Score word decoding with its controls.</p>
+<pre><code>python eval_stage1.py --heldout_subject sub-01 \
+    --stage1_checkpoint_path checkpoints/joint_annealed_exact/stage1_best_sub-01_joint_annealed_exact.pt \
+    --zero_control --shuffle_control</code></pre></li>
+      <li><p>Run the fusion experiments. Use <code>row_zscore</code> to match the paper; B = 3 and k = 10 are the settings shown in Figure 2.</p>
+<pre><code>python fusion_teacher_forced.py --heldout_subject sub-01 --normalization row_zscore --plot
+python fusion_beamsearch.py --heldout_subject sub-01 --normalization row_zscore \
+    --beam_width 3 --top_k 10 --out_dir fusion_grid --plot
+python fusion_beamsearch_null.py --heldout_subject sub-01 --normalization row_zscore \
+    --beam_width 3 --top_k 10 --seed 0 --plot</code></pre></li>
+      <li><p>Repeat on mapped imagined MEG. These scripts read predicted-listened trials from <code>predicted_npy/&lt;mapping_key&gt;/</code>, produced by the imagined-to-listened mapping of <a href="https://arxiv.org/abs/2605.08075">[11]</a>.</p>
+<pre><code>python imagined_eval/fusion_beamsearch_imagined.py --mapping_key RNN_full \
+    --normalization row_zscore --beam_width 3 --top_k 10 \
+    --out_dir imagined_eval/fusion_grid_imagined</code></pre></li>
+      <li><p>Plot the sweeps.</p>
+<pre><code>python plot_beam_grid.py --fusion_results_dir fusion_grid
+python plot_beam_grid.py --fusion_results_dir imagined_eval/fusion_grid_imagined --mapping_key RNN_full</code></pre></li>
+    </ol>
+
+    <h3>Paper settings and their flags</h3>
+    <div class="table-scroll">
+      <table class="map">
+        <thead><tr><th scope="col">Paper</th><th scope="col">Code</th></tr></thead>
+        <tbody>
+          <tr><td>Acoustic target, ℓ<sub>a</sub> = 6</td><td><code>--audio_layer</code> (default 6)</td></tr>
+          <tr><td>Language target, ℓ<sub>w</sub> = 8</td><td><code>--gpt2_mid_layer</code> (default 8)</td></tr>
+          <tr><td>λ cosine anneal 0.8 → 0.2, 15 epochs</td><td><code>--anneal_mode joint_annealed --anneal_epochs 15</code></td></tr>
+          <tr><td>Mean-pooled MEG per word</td><td><code>--pooling_mode exact</code></td></tr>
+          <tr><td>Per-position z-scoring</td><td><code>--normalization row_zscore</code></td></tr>
+          <tr><td>Beam width B, candidates k</td><td><code>--beam_width</code>, <code>--top_k</code></td></tr>
+          <tr><td>Other language models (e.g. SmolLM)</td><td><code>--llm_name</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="citation">
+  <div class="wrap">
+    <h2>Citation</h2>
+    <div class="cite">
+<pre id="bibtex"><code>@article{maghsoudi2026integrating,
+  title   = {Integrating Language Models into Listened and Imagined Speech Decoding from MEG},
+  author  = {Maghsoudi, Maryam and Kankanala, Sai Samrat and Shamma, Shihab A. and Ganapathy, Sriram},
+  journal = {arXiv preprint arXiv:2609.31997},
+  year    = {2026}
+}</code></pre>
+      <button class="copy" type="button" id="copy">Copy</button>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>University of Maryland, College Park and Indian Institute of Science, Bengaluru. <button class="theme-toggle" type="button" id="theme">Switch to dark</button></p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  // Balance instrument: pure arithmetic of the fusion rule, no data.
+  var a = document.getElementById('alpha'), wn = document.getElementById('wn'), wl = document.getElementById('wl');
+  var sn = document.getElementById('sn'), sl = document.getElementById('sl'), note = document.getElementById('balance-note');
+  function describe(x){
+    if (x === 0) return 'α = 0 ranks words by MEG alone. For listened speech this beats the language model alone; for imagined speech it does not.';
+    if (x === 1) return 'α = 1 lets the language model choose alone. Mapped imagined MEG prefers this endpoint over MEG alone; listened MEG does the opposite.';
+    if (x >= 0.9) return 'Close to α = 1, accuracy drops under beam search, and the drop gets steeper as more candidates are allowed through.';
+    return 'Under beam search, both conditions peak at an intermediate α. The peak sits further toward the language model for imagined speech than for listened speech.';
+  }
+  function update(){
+    var x = Math.round(parseFloat(a.value) * 100) / 100;
+    wn.textContent = (1 - x).toFixed(2);
+    wl.textContent = x.toFixed(2);
+    sn.style.flexBasis = ((1 - x) * 100) + '%';
+    sl.style.flexBasis = (x * 100) + '%';
+    note.textContent = describe(x);
+    a.setAttribute('aria-valuetext', 'alpha ' + x.toFixed(2) + ', MEG weight ' + (1 - x).toFixed(2) + ', language model weight ' + x.toFixed(2));
+  }
+  a.addEventListener('input', update); update();
+
+  // Table 1 as small multiples (same numbers as the table).
+  var rows = [
+    {g:'Listened', d:'Previous', t1:[1.44,0.16], t5:[7.45,0.60]},
+    {g:'Listened', d:'Proposed', t1:[14.17,0.81], t5:[46.96,1.56], ours:true},
+    {g:'Listened', d:'Shuffled', t1:[4.12,0.10], t5:[18.41,0.18]},
+    {g:'Mapped imagined', d:'Previous', t1:[1.26,0.09], t5:[6.71,0.21]},
+    {g:'Mapped imagined', d:'Proposed', t1:[7.05,0.35], t5:[31.14,0.97], ours:true},
+    {g:'Mapped imagined', d:'Shuffled', t1:[3.93,0.08], t5:[18.69,0.14]}
+  ];
+  var host = document.getElementById('bars');
+  [['t1','Top-1 accuracy',16],['t5','Top-5 accuracy',50]].forEach(function(m){
+    var col = document.createElement('div');
+    var h = document.createElement('h3'); h.textContent = m[1]; col.appendChild(h);
+    ['Listened','Mapped imagined'].forEach(function(g){
+      var grp = document.createElement('div'); grp.className = 'bar-group';
+      var gl = document.createElement('p'); gl.className = 'g'; gl.textContent = g; grp.appendChild(gl);
+      rows.filter(function(r){return r.g === g;}).forEach(function(r){
+        var v = r[m[0]][0], e = r[m[0]][1], max = m[2];
+        var row = document.createElement('div'); row.className = 'bar-row' + (r.ours ? ' ours' : '');
+        row.innerHTML = '<span class="lab"></span><span class="bar-track"><span class="bar-fill"></span><span class="bar-err"></span></span><span class="v"></span>';
+        row.querySelector('.lab').textContent = r.d;
+        row.querySelector('.bar-fill').style.width = (v / max * 100) + '%';
+        var err = row.querySelector('.bar-err');
+        err.style.left = ((v - e) / max * 100) + '%'; err.style.width = (2 * e / max * 100) + '%';
+        row.querySelector('.v').textContent = v.toFixed(1) + '%';
+        grp.appendChild(row);
+      });
+      col.appendChild(grp);
+    });
+    host.appendChild(col);
+  });
+
+  // Paper figures are optional: hide a slot whose image is not in docs/figures/.
+  document.querySelectorAll('figure[data-optional] img').forEach(function(img){
+    function hide(){ img.closest('figure').hidden = true; }
+    if (img.complete && img.naturalWidth === 0) hide();
+    img.addEventListener('error', hide);
+  });
+
+  // Copy BibTeX.
+  var btn = document.getElementById('copy');
+  btn.addEventListener('click', function(){
+    var text = document.getElementById('bibtex').innerText;
+    function done(){ btn.textContent = 'Copied'; setTimeout(function(){ btn.textContent = 'Copy'; }, 1600); }
+    if (navigator.clipboard) { navigator.clipboard.writeText(text).then(done, function(){ btn.textContent = 'Select and copy'; }); }
+  });
+
+  // Theme toggle.
+  var root = document.documentElement, tb = document.getElementById('theme');
+  function isDark(){ var t = root.getAttribute('data-theme'); return t ? t === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches; }
+  function label(){ tb.textContent = isDark() ? 'Switch to light' : 'Switch to dark'; }
+  tb.addEventListener('click', function(){ root.setAttribute('data-theme', isDark() ? 'light' : 'dark'); label(); });
+  label();
+})();
+</script>
+</body>
+</html>
