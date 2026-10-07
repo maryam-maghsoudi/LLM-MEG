@@ -15,7 +15,7 @@
   --paper:#F2F4F7; --surface:#FFFFFF; --ink:#17202E; --muted:#556275; --rule:#D3DAE3;
   --neural:#2B6A99; --neural-soft:#DCE8F2; --language:#A8325E; --language-soft:#F3DDE6;
   --grey-bar:#AEB8C5; --code-bg:#E7EBF0;
-  --measure:40rem; --wide:58rem;
+  --measure:48rem; --wide:74rem;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
@@ -30,7 +30,7 @@
   --grey-bar:#536173; --code-bg:#1D2632;
 }
 *{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
+html{-webkit-text-size-adjust:100%;font-size:112.5%}
 body{margin:0;background:var(--paper);color:var(--ink);font-family:"Spectral",Georgia,serif;font-size:1.1rem;line-height:1.62;font-feature-settings:"onum" 1,"kern" 1}
 a{color:var(--neural);text-underline-offset:.18em;text-decoration-thickness:1px}
 a:hover{text-decoration-thickness:2px}
@@ -46,7 +46,7 @@ section{padding:3.25rem 0;border-top:1px solid var(--rule)}
 
 /* Header */
 header{padding:3.5rem 0 2rem}
-h1{font-size:clamp(1.9rem,4.6vw,2.9rem);margin:0 0 1.4rem;max-width:22ch;font-weight:500}
+h1{font-size:clamp(1.9rem,4.6vw,2.9rem);margin:0 0 1.4rem;max-width:30ch;font-weight:500}
 .authors{font-size:1.15rem;margin:0 0 .35rem}
 .authors span{white-space:nowrap}
 .affil{color:var(--muted);font-size:.98rem;margin:0 0 1.6rem}
@@ -64,19 +64,24 @@ sup{font-size:.68em;line-height:0}
 .split{display:flex;height:14px;border-radius:7px;overflow:hidden;margin:0 0 .9rem;background:var(--rule)}
 .split .sn{background:var(--neural);transition:flex-basis .12s linear}
 .split .sl{background:var(--language);transition:flex-basis .12s linear}
+.slider-hint{margin:0 0 .5rem;font-size:1.05rem;color:var(--ink)}
+.slider-hint .arrow{display:inline-block;margin-right:.4rem;color:var(--neural);font-size:1.35em;line-height:1;vertical-align:-.08em}
 .slider-row{display:flex;align-items:center;gap:1rem}
 .slider-row label{white-space:nowrap;font-style:italic}
 input[type=range]{flex:1;accent-color:var(--ink);min-width:0}
 .balance-note{color:var(--muted);font-size:1rem;margin:1rem 0 0;max-width:var(--measure);min-height:3.2em}
 @media (prefers-reduced-motion: reduce){.split .sn,.split .sl{transition:none}}
 
-.finding{font-size:clamp(1.25rem,2.6vw,1.5rem);line-height:1.45;max-width:34ch;margin:2.4rem 0 0}
+.finding{font-size:clamp(1.25rem,2.6vw,1.5rem);line-height:1.45;max-width:46ch;margin:2.4rem 0 0}
 
 /* Figures */
 figure{margin:2rem 0}
 figure svg{display:block;width:100%;height:auto}
 figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:var(--measure)}
 figcaption b{color:var(--ink);font-weight:600}
+.paper-fig.compact img{width:70%;margin:0 auto}
+.paper-fig.compact figcaption{width:70%;margin:.7rem auto 0}
+@media (max-width:640px){.paper-fig.compact img,.paper-fig.compact figcaption{width:100%}}
 .paper-fig img{display:block;width:100%;height:auto;background:#fff;border:1px solid var(--rule);border-radius:6px}
 .diagram{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:1rem;overflow-x:auto}
 @media (max-width:640px){.diagram svg{min-width:620px}}
@@ -173,9 +178,10 @@ footer{border-top:1px solid var(--rule);padding:2rem 0 3rem;color:var(--muted);f
       + <span class="l" id="wl">0.50</span> · <span class="l">LLM</span>(<span class="k">w</span>)
     </p>
     <div class="split" aria-hidden="true"><div class="sn" id="sn" style="flex-basis:50%"></div><div class="sl" id="sl" style="flex-basis:50%"></div></div>
+    <p class="slider-hint" id="slider-hint"><span class="arrow" aria-hidden="true">↔</span>Drag the slider to change α and watch the weight move between MEG and the language model.</p>
     <div class="slider-row">
       <label for="alpha">α</label>
-      <input type="range" id="alpha" min="0" max="1" step="0.01" value="0.5" aria-describedby="balance-note">
+      <input type="range" id="alpha" min="0" max="1" step="0.01" value="0.5" aria-describedby="slider-hint balance-note">
     </div>
     <p class="balance-note" id="balance-note" aria-live="polite"></p>
   </div>
@@ -325,11 +331,11 @@ footer{border-top:1px solid var(--rule);padding:2rem 0 3rem;color:var(--muted);f
       <p>The same pattern appears when GPT-2 is replaced with SmolLM, so the effect is not specific to one language model.</p>
     </div>
 
-    <figure class="paper-fig" data-optional>
+    <figure class="paper-fig compact" data-optional>
       <img src="figures/fig2.png" alt="Figure 2 from the paper: word accuracy versus fusion weight alpha">
       <figcaption><b>Figure 2.</b> Word accuracy versus α. (A) Teacher-forced fusion. (B, C) Beam search (B = 3, k = 10) for listened and mapped imagined MEG, against a random-candidate null and LLM-only beam search over the full vocabulary. Shading is SEM across subjects; markers show the best α.</figcaption>
     </figure>
-    <figure class="paper-fig" data-optional>
+    <figure class="paper-fig compact" data-optional>
       <img src="figures/fig3.png" alt="Figure 3 from the paper: optimal alpha and relative gain for listened and imagined MEG">
       <figcaption><b>Figure 3.</b> The neural/language balance. Accuracy versus α for several k at B = 3, the relative gain over MEG-only ranking at α* with paired per-subject lines, and α* for each k. Mapped imagined MEG has the higher α* and the larger gain.</figcaption>
     </figure>
